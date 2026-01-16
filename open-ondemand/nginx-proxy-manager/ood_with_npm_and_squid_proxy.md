@@ -128,8 +128,17 @@ max_filedescriptors 65536
 
 ```bash
 sudo useradd -r -s /bin/false squid 2>/dev/null || true
+```
+
+```bash
 sudo mkdir -p /var/spool/squid /var/log/squid
+```
+
+```bash
 sudo chown -R squid:squid /var/spool/squid /var/log/squid
+```
+
+```bash
 sudo chmod -R 755 /var/spool/squid
 ```
 
@@ -143,7 +152,13 @@ sudo /usr/sbin/squid -z
 
 ```bash
 sudo systemctl enable squid
+```
+
+```bash
 sudo systemctl start squid
+```
+
+```bash
 sudo systemctl status squid
 ```
 
@@ -151,6 +166,9 @@ sudo systemctl status squid
 
 ```bash
 sudo netstat -tlnp | grep squid
+```
+
+```bash
 sudo curl -x http://squid.example.local:3128 http://example.com
 ```
 
@@ -238,7 +256,9 @@ http_proxy=http://squid.example.local:3128
 https_proxy=http://squid.example.local:3128
 no_proxy=localhost,127.0.0.1,10.180.0.0/16,.example.local
 EOF
+```
 
+```bash
 chmod 600 ~/.wgetrc
 ```
 
@@ -301,39 +321,42 @@ If successful, you should see the OIDC metadata.
 ### 7.1 From OOD Server (10.180.10.100)
 
 ```bash
-# Test DNS
 nslookup squid.example.local
+```
 
-# Test Squid connectivity
+```bash
 telnet squid.example.local 3128
+```
 
-# Test proxy through curl
+```bash
 curl -x http://squid.example.local:3128 -v https://www.example.com
+```
 
-# Test OIDC endpoint
+```bash
 curl -x http://squid.example.local:3128 -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration | head -20
 ```
 
 ### 7.2 From Squid Server (10.180.14.100)
 
 ```bash
-# Check listening ports
 sudo netstat -tlnp | grep squid
+```
 
-# Monitor access logs in real-time
+```bash
 sudo tail -f /var/log/squid/access.log
+```
 
-# Check cache status
+```bash
 sudo squid -k check
 ```
 
 ### 7.3 Monitor Squid Cache
 
 ```bash
-# See current connections
 sudo tail -20 /var/log/squid/access.log
+```
 
-# Filter for errors
+```bash
 sudo grep "TCP_DENIED\|TCP_MISS" /var/log/squid/access.log | tail -20
 ```
 
@@ -347,6 +370,9 @@ Allow outbound to Squid:
 
 ```bash
 sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="10.180.14.100" port protocol="tcp" port="3128" accept'
+```
+
+```bash
 sudo firewall-cmd --reload
 ```
 
@@ -356,7 +382,13 @@ Allow inbound from OOD:
 
 ```bash
 sudo firewall-cmd --permanent --add-source=10.180.10.100/32 --zone=trusted
+```
+
+```bash
 sudo firewall-cmd --permanent --add-port=3128/tcp
+```
+
+```bash
 sudo firewall-cmd --reload
 ```
 
@@ -366,6 +398,9 @@ Ensure it can still reach OOD:
 
 ```bash
 sudo firewall-cmd --permanent --add-rich-rule='rule family="ipv4" destination address="10.180.10.100" port protocol="tcp" port="443" accept'
+```
+
+```bash
 sudo firewall-cmd --reload
 ```
 
@@ -400,8 +435,6 @@ sudo tail -f /var/log/squid/access.log
 
 ```bash
 sudo dnf update -y
-# Check Squid logs for package repository requests
-sudo grep "\.rpm\|\.repository" /var/log/squid/access.log | tail -10
 ```
 
 ---
@@ -457,16 +490,18 @@ OIDCHTTPTimeoutLong 60
 
 **Solution:**
 ```bash
-# 1. Check Squid is accessible
 curl -x http://squid.example.local:3128 -v https://login.microsoftonline.com
+```
 
-# 2. Check Squid logs for blocked requests
+```bash
 sudo grep "TCP_DENIED" /var/log/squid/access.log | head -10
+```
 
-# 3. Verify OIDC metadata can be fetched
+```bash
 curl -x http://squid.example.local:3128 https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration
+```
 
-# 4. Check Apache error logs
+```bash
 sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 ```
 
@@ -477,19 +512,22 @@ sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 
 **Solution:**
 ```bash
-# 1. Verify Squid is running
 sudo systemctl status squid
+```
 
-# 2. Check if listening on 3128
+```bash
 sudo netstat -tlnp | grep 3128
+```
 
-# 3. Check firewall
+```bash
 sudo firewall-cmd --list-all
+```
 
-# 4. Verify DNS
+```bash
 nslookup squid.example.local
+```
 
-# 5. Test direct TCP
+```bash
 telnet squid.example.local 3128
 ```
 

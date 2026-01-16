@@ -98,7 +98,13 @@ Squid → Internet: 80, 443 ✓
 
 ```bash
 hostname -f
+```
+
+```bash
 realm list
+```
+
+```bash
 id someuser@example.local
 ```
 
@@ -106,6 +112,9 @@ Ensure home directories are auto-created:
 
 ```bash
 sudo authselect current
+```
+
+```bash
 grep mkhomedir /etc/sssd/sssd.conf
 ```
 
@@ -113,6 +122,9 @@ Enable if needed:
 
 ```bash
 sudo authselect enable-feature with-mkhomedir
+```
+
+```bash
 sudo systemctl restart sssd
 ```
 
@@ -124,8 +136,17 @@ sudo systemctl restart sssd
 
 ```bash
 sudo dnf config-manager --set-enabled crb
+```
+
+```bash
 sudo dnf install -y epel-release
-sudo dnf module enable ruby:3.3 nodejs:20 -y 
+```
+
+```bash
+sudo dnf module enable ruby:3.3 nodejs:20 -y
+```
+
+```bash
 sudo dnf install -y https://yum.osc.edu/ondemand/4.0/ondemand-release-web-4.0-1.el8.noarch.rpm
 ```
 
@@ -133,6 +154,9 @@ sudo dnf install -y https://yum.osc.edu/ondemand/4.0/ondemand-release-web-4.0-1.
 
 ```bash
 sudo dnf install -y ondemand mod_auth_openidc
+```
+
+```bash
 sudo systemctl enable --now httpd
 ```
 
@@ -149,8 +173,13 @@ sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -keyout /etc/pki/tls/private/ood.key \
   -out /etc/pki/tls/certs/ood.crt \
   -subj "/CN=ood.example.local"
+```
 
+```bash
 sudo chown root:root /etc/pki/tls/private/ood.key
+```
+
+```bash
 sudo chmod 600 /etc/pki/tls/private/ood.key
 ```
 
@@ -207,7 +236,9 @@ export HTTPS_PROXY=http://squid.example.local:3128
 export no_proxy=localhost,127.0.0.1,10.180.0.0/16,.example.local
 export NO_PROXY=localhost,127.0.0.1,10.180.0.0/16,.example.local
 EOF
+```
 
+```bash
 sudo chmod +x /etc/profile.d/squid-proxy.sh
 ```
 
@@ -228,15 +259,22 @@ SetEnv NO_PROXY localhost,127.0.0.1,10.180.0.0/16,.example.local
 ### 8.3 Verify Squid Connectivity
 
 ```bash
-# Test DNS
 nslookup squid.example.local
+```
 
-# Test Squid connectivity
+```bash
 telnet squid.example.local 3128
+```
 
-# Test proxy through curl
+```bash
 export http_proxy=http://squid.example.local:3128
+```
+
+```bash
 export https_proxy=http://squid.example.local:3128
+```
+
+```bash
 curl -v https://login.microsoftonline.com
 ```
 
@@ -254,7 +292,13 @@ Add an user mapping script:
 
 ```bash
 sudo mkdir -p /opt/ood/site
+```
+
+```bash
 sudo nano /opt/ood/site/remote-user-mapping.sh
+```
+
+```bash
 sudo touch /opt/ood/site/remote-user-mapping.sh
 ```
 
@@ -348,6 +392,9 @@ SetEnvIf X-Forwarded-Proto https HTTPS=on
 
 ```bash
 sudo /opt/ood/ood-portal-generator/sbin/update_ood_portal
+```
+
+```bash
 sudo systemctl restart httpd
 ```
 
@@ -366,11 +413,14 @@ sudo apachectl -S
 From OOD server:
 
 ```bash
-# Test Squid
 telnet squid.example.local 3128
+```
 
-# Test OIDC endpoint through Squid
+```bash
 export https_proxy=http://squid.example.local:3128
+```
+
+```bash
 curl -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration | head -20
 ```
 
@@ -379,10 +429,10 @@ curl -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configu
 From internal network (or through NPM):
 
 ```bash
-# Direct to OOD (internal test)
 curl -k https://ood.example.local
+```
 
-# Through NPM (as end users will access)
+```bash
 curl -k https://ondemand.example.com
 ```
 
@@ -399,22 +449,28 @@ curl -k https://ondemand.example.com
 ### Step 4: Verify User
 
 ```bash
-# On OOD server
 whoami
+```
+
+```bash
 id
+```
+
+```bash
 ls /home/user
 ```
 
 ### Step 5: Monitor Logs
 
 ```bash
-# Apache error log
 sudo tail -f /var/log/httpd/error_log
+```
 
-# Check for OIDC issues
+```bash
 sudo grep -i oidc /var/log/httpd/error_log
+```
 
-# Squid access log (check from Squid server)
+```bash
 sudo tail -f /var/log/squid/access.log | grep login.microsoftonline
 ```
 
@@ -435,14 +491,18 @@ sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 ### Squid Connectivity Issues
 
 ```bash
-# From OOD server
 telnet squid.example.local 3128
+```
 
-# Test OIDC metadata fetch
+```bash
 export https_proxy=http://squid.example.local:3128
-curl -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration
+```
 
-# Check Squid logs (from Squid server)
+```bash
+curl -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration
+```
+
+```bash
 sudo tail -f /var/log/squid/access.log | grep login.microsoftonline
 ```
 
@@ -450,19 +510,23 @@ sudo tail -f /var/log/squid/access.log | grep login.microsoftonline
 
 ```bash
 getent passwd user
+```
 
-# Verify FreeIPA
+```bash
 id user@example.local
 ```
 
 ### NPM Not Reaching OOD
 
 ```bash
-# From NPM server
 curl -k -v https://10.1.41.100
+```
 
-# From OOD server, check Apache
+```bash
 sudo apachectl -S
+```
+
+```bash
 sudo systemctl status httpd
 ```
 
@@ -470,7 +534,13 @@ sudo systemctl status httpd
 
 ```bash
 sudo getenforce
+```
+
+```bash
 sudo setenforce 0  # Temporarily disable for testing
+```
+
+```bash
 sudo setenforce 1  # Re-enable
 ```
 
@@ -503,7 +573,11 @@ ExecStart=
 ExecStart=/usr/sbin/chronyd -x \$OPTIONS
 EOF
 ```
+
 ```bash
 systemctl daemon-reload
+```
+
+```bash
 systemctl restart chronyd
 ```
