@@ -11,6 +11,37 @@
 
 ---
 
+## Environment Variables
+
+**IMPORTANT:** Customize these variables for your environment before running commands:
+
+```bash
+# Domain names
+export DOMAIN_LOCAL="example.local"
+export DOMAIN_COM="example.com"
+
+# IP addresses
+export OOD_IP="10.1.41.100"
+export NPM_IP="10.1.43.100"
+export SQUID_IP="10.1.43.100"
+
+# Hostnames
+export OOD_HOSTNAME="ood.${DOMAIN_LOCAL}"
+export PUBLIC_HOSTNAME="ondemand.${DOMAIN_COM}"
+export SQUID_HOSTNAME="squid.${DOMAIN_LOCAL}"
+
+# Azure AD (update with your values)
+export AZURE_TENANT_ID="your-tenant-id"
+export AZURE_CLIENT_ID="your-client-id"
+export AZURE_CLIENT_SECRET="your-client-secret"
+```
+
+Once exported, you can copy and run all commands directly. For example:
+- `${OOD_HOSTNAME}` → `ood.example.local` or `ood.csn.corp`
+- `${PUBLIC_HOSTNAME}` → `ondemand.example.com` or `ondemand.csn.corp`
+
+---
+
 ## 1. Architecture Overview
 
 ```
@@ -172,7 +203,7 @@ OOD runs HTTPS with a self-signed cert that NPM ignores:
 sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/pki/tls/private/ood.key \
   -out /etc/pki/tls/certs/ood.crt \
-  -subj "/CN=ood.example.local"
+  -subj "/CN=${OOD_HOSTNAME}"
 ```
 
 ```bash
@@ -198,10 +229,10 @@ sudo chmod 600 /etc/pki/tls/private/ood.key
 **MUST use the public NPM URL, NOT the internal OOD URL:**
 
 ```
-https://ondemand.example.com/oidc
+https://${PUBLIC_HOSTNAME}/oidc
 ```
 
-> This is the NPM public hostname, not ood.example.local
+> This is the NPM public hostname, not ${OOD_HOSTNAME}
 
 ### API Permissions
 
@@ -229,12 +260,12 @@ Create `/etc/profile.d/squid-proxy.sh`:
 ```bash
 sudo tee /etc/profile.d/squid-proxy.sh > /dev/null <<'EOF'
 # Squid proxy configuration for outbound traffic
-export http_proxy=http://squid.example.local:3128
-export https_proxy=http://squid.example.local:3128
-export HTTP_PROXY=http://squid.example.local:3128
-export HTTPS_PROXY=http://squid.example.local:3128
-export no_proxy=localhost,127.0.0.1,10.180.0.0/16,.example.local
-export NO_PROXY=localhost,127.0.0.1,10.180.0.0/16,.example.local
+export http_proxy=http://${SQUID_HOSTNAME}:3128
+export https_proxy=http://${SQUID_HOSTNAME}:3128
+export HTTP_PROXY=http://${SQUID_HOSTNAME}:3128
+export HTTPS_PROXY=http://${SQUID_HOSTNAME}:3128
+export no_proxy=localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
+export NO_PROXY=localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
 EOF
 ```
 
@@ -248,30 +279,30 @@ Create `/etc/httpd/conf.d/ood-squid-proxy.conf`:
 
 ```apache
 # Environment variables for Apache processes to use Squid
-SetEnv http_proxy http://squid.example.local:3128
-SetEnv https_proxy http://squid.example.local:3128
-SetEnv HTTP_PROXY http://squid.example.local:3128
-SetEnv HTTPS_PROXY http://squid.example.local:3128
-SetEnv no_proxy localhost,127.0.0.1,10.180.0.0/16,.example.local
-SetEnv NO_PROXY localhost,127.0.0.1,10.180.0.0/16,.example.local
+SetEnv http_proxy http://${SQUID_HOSTNAME}:3128
+SetEnv https_proxy http://${SQUID_HOSTNAME}:3128
+SetEnv HTTP_PROXY http://${SQUID_HOSTNAME}:3128
+SetEnv HTTPS_PROXY http://${SQUID_HOSTNAME}:3128
+SetEnv no_proxy localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
+SetEnv NO_PROXY localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
 ```
 
 ### 8.3 Verify Squid Connectivity
 
 ```bash
-nslookup squid.example.local
+nslookup ${SQUID_HOSTNAME}
 ```
 
 ```bash
-telnet squid.example.local 3128
+telnet ${SQUID_HOSTNAME} 3128
 ```
 
 ```bash
-export http_proxy=http://squid.example.local:3128
+export http_proxy=http://${SQUID_HOSTNAME}:3128
 ```
 
 ```bash
-export https_proxy=http://squid.example.local:3128
+export https_proxy=http://${SQUID_HOSTNAME}:3128
 ```
 
 ```bash
@@ -285,7 +316,7 @@ curl -v https://login.microsoftonline.com
 OOD must map:
 
 ```
-user@example.com → user
+user@${DOMAIN_COM} → user
 ```
 
 Add an user mapping script:
@@ -294,34 +325,28 @@ Add an user mapping script:
 sudo mkdir -p /opt/ood/site
 ```
 
-```bash
-sudo nano /opt/ood/site/remote-user-mapping.sh
-```
-
-```bash
-sudo touch /opt/ood/site/remote-user-mapping.sh
-```
-
 Required content:
 
-```regex
+```bash
+sudo tee /opt/ood/site/remote-user-mapping.sh > /dev/null <<EOF
 #!/bin/bash
 
-function urldecode() { : "${*//+/ }"; echo -e "${_//%/\\x}"; }
+function urldecode() { : "\${*//+/ }"; echo -e "\${_//%/\\\\x}"; }
 
-REX="([^@]+)@example.com"
-INPUT_USER=$(urldecode $1)
+REX="([^@]+)@${DOMAIN_COM}"
+INPUT_USER=\$(urldecode \$1)
 
-if [[ $INPUT_USER =~ $REX ]]; then
-  MATCH="${BASH_REMATCH[1]}"
-  echo "$MATCH" | tr '[:upper:]' '[:lower:]'
+if [[ \$INPUT_USER =~ \$REX ]]; then
+  MATCH="\${BASH_REMATCH[1]}"
+  echo "\$MATCH" | tr '[:upper:]' '[:lower:]'
 else
   # can't write to standard out or error, so let's use syslog
-  logger -t 'ood-mapping' "cannot map $INPUT_USER"
+  logger -t 'ood-mapping' "cannot map \$INPUT_USER"
 
   # and exit 1
   exit 1
 fi
+EOF
 ```
 
 ---
@@ -338,7 +363,7 @@ sudo vi /etc/ood/config/ood_portal.yml
 
 ```yaml
 # Use internal hostname, NOT the public NPM hostname
-servername: ood.example.local
+servername: ${OOD_HOSTNAME}
 
 # Use the self-signed certificate we created
 ssl:
@@ -350,9 +375,9 @@ auth:
   - 'Require valid-user'
 
 oidc_uri: /oidc/
-oidc_provider_metadata_url: 'https://login.microsoftonline.com/<azure directory id>/v2.0/.well-known/openid-configuration'
-oidc_client_id: '<azure client id>'
-oidc_client_secret: '<azure client secret>'
+oidc_provider_metadata_url: 'https://login.microsoftonline.com/${AZURE_TENANT_ID}/v2.0/.well-known/openid-configuration'
+oidc_client_id: '${AZURE_CLIENT_ID}'
+oidc_client_secret: '${AZURE_CLIENT_SECRET}'
 
 oidc_scope: 'openid profile email'
 oidc_remote_user_claim: email
@@ -377,10 +402,10 @@ Since NPM is the reverse proxy, add trust configuration for NPM-provided headers
 Edit `/etc/httpd/conf.d/ood-npm-trust.conf`:
 
 ```apache
-# Trust headers from NPM reverse proxy at 10.1.43.100
+# Trust headers from NPM reverse proxy
 RemoteIPHeader X-Forwarded-For
-RemoteIPTrustedProxy 10.1.43.100
-RemoteIPInternalProxy 10.1.43.100
+RemoteIPTrustedProxy ${NPM_IP}
+RemoteIPInternalProxy ${NPM_IP}
 
 # Preserve original protocol from NPM
 SetEnvIf X-Forwarded-Proto https HTTPS=on
@@ -413,11 +438,11 @@ sudo apachectl -S
 From OOD server:
 
 ```bash
-telnet squid.example.local 3128
+telnet ${SQUID_HOSTNAME} 3128
 ```
 
 ```bash
-export https_proxy=http://squid.example.local:3128
+export https_proxy=http://${SQUID_HOSTNAME}:3128
 ```
 
 ```bash
@@ -429,20 +454,20 @@ curl -v https://login.microsoftonline.com/common/v2.0/.well-known/openid-configu
 From internal network (or through NPM):
 
 ```bash
-curl -k https://ood.example.local
+curl -k https://${OOD_HOSTNAME}
 ```
 
 ```bash
-curl -k https://ondemand.example.com
+curl -k https://${PUBLIC_HOSTNAME}
 ```
 
 ### Step 3: Web Browser Test
 
-1. **Open browser to:** `https://ondemand.example.com`
+1. **Open browser to:** `https://${PUBLIC_HOSTNAME}`
    - This hits NPM, which proxies to OOD
 2. **Should redirect to:** Microsoft 365 login
-   - Check that redirect uses `ondemand.example.com` (not `ood.example.local`)
-3. **Authenticate** with `user@example.com`
+   - Check that redirect uses `${PUBLIC_HOSTNAME}` (not `${OOD_HOSTNAME}`)
+3. **Authenticate** with `user@${DOMAIN_COM}`
 4. **Complete MFA** (if enabled)
 5. **Verify landing** on OOD dashboard
 
@@ -485,17 +510,17 @@ sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 ```
 
 **Common issue: Redirect URI mismatch**
-- Check Azure AD app has redirect URI: `https://ondemand.example.com/oidc`
-- NOT `https://ood.example.local/oidc`
+- Check Azure AD app has redirect URI: `https://${PUBLIC_HOSTNAME}/oidc`
+- NOT `https://${OOD_HOSTNAME}/oidc`
 
 ### Squid Connectivity Issues
 
 ```bash
-telnet squid.example.local 3128
+telnet ${SQUID_HOSTNAME} 3128
 ```
 
 ```bash
-export https_proxy=http://squid.example.local:3128
+export https_proxy=http://${SQUID_HOSTNAME}:3128
 ```
 
 ```bash
@@ -513,13 +538,13 @@ getent passwd user
 ```
 
 ```bash
-id user@example.local
+id user@${DOMAIN_LOCAL}
 ```
 
 ### NPM Not Reaching OOD
 
 ```bash
-curl -k -v https://10.1.41.100
+curl -k -v https://${OOD_IP}
 ```
 
 ```bash
