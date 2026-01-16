@@ -169,7 +169,7 @@ sudo systemctl enable --now httpd
 OOD runs HTTPS with a self-signed cert that NPM ignores:
 
 ```bash
-sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/pki/tls/private/ood.key \
   -out /etc/pki/tls/certs/ood.crt \
   -subj "/CN=ood.example.local"
