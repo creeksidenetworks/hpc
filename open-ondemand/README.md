@@ -258,7 +258,7 @@ Before OIDC can work, OOD needs access to Microsoft's OIDC endpoints through Squ
 Create `/etc/profile.d/squid-proxy.sh`:
 
 ```bash
-sudo tee /etc/profile.d/squid-proxy.sh > /dev/null <<'EOF'
+sudo tee /etc/profile.d/squid-proxy.sh > /dev/null <<EOF
 # Squid proxy configuration for outbound traffic
 export http_proxy=http://${SQUID_HOSTNAME}:3128
 export https_proxy=http://${SQUID_HOSTNAME}:3128
