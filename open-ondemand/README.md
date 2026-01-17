@@ -114,6 +114,12 @@ If you're using a **non-standard port** (e.g., `https://ondemand.example.com:584
 location / {
     # Set the REAL external port here (change 58443 to your port)
     set $external_port 58443;
+    set $forwarded_host $host;
+    
+    # If the request didn't come with a port, add the external port
+    if ($forwarded_host !~ :) {
+        set $forwarded_host $host:$external_port;
+    }
 
     proxy_pass https://10.1.41.100:443;
     
@@ -123,9 +129,12 @@ location / {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
     
-    # CRITICAL: Tell OOD the internet-facing port (prevents redirect to internal hostname)
+    # CRITICAL: Tell OOD the internet-facing port and full hostname:port
     proxy_set_header X-Forwarded-Port $external_port;
-    proxy_set_header X-Forwarded-Host $host:$external_port;
+    proxy_set_header X-Forwarded-Host $forwarded_host;
+    
+    # Also set the server port for mod_auth_openidc to use
+    proxy_set_header X-Server-Port $external_port;
 
     # Buffer sizes for OIDC tokens
     proxy_buffer_size 128k;
@@ -264,13 +273,24 @@ sudo chmod 600 /etc/pki/tls/private/ood.key
 
 ### Redirect URI (CRITICAL)
 
-**MUST use the public NPM URL, NOT the internal OOD URL:**
+**MUST include the external port and match exactly what mod_auth_openidc uses:**
 
+For non-standard ports, register the full URL with port:
+```
+https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}/oidc
+```
+
+For standard port 443:
 ```
 https://${PUBLIC_HOSTNAME}/oidc
 ```
 
-> This is the NPM public hostname, not ${OOD_HOSTNAME}
+**Example for port 58443:**
+```
+https://ondemand.cn.creekside.network:58443/oidc
+```
+
+> Azure AD **must have this exact redirect URI** or OIDC will fail with "redirect_uri mismatch"
 
 ### API Permissions
 
@@ -405,8 +425,9 @@ sudo vi /etc/ood/config/ood_portal.yml
 
 ```bash
 sudo tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
-# Use PUBLIC hostname with port for OIDC redirects (NPM will handle internal routing)
-servername: ${PUBLIC_HOSTNAME}:${PUBLIC_PORT}
+# Use PUBLIC hostname and external port
+servername: ${PUBLIC_HOSTNAME}
+port: ${PUBLIC_PORT}
 
 # Use the self-signed certificate we created
 ssl:
@@ -440,11 +461,13 @@ EOF
 
 ---
 
-## 11. Add NPM Trust Headers
+## 11. Add NPM Trust Headers & Port Reconstruction
 
-Since NPM is the reverse proxy, add trust configuration for NPM-provided headers:
+Since NPM is the reverse proxy and uses a non-standard port, Apache needs to:
+1. Trust headers from NPM
+2. Reconstruct the full URL (with port) from X-Forwarded-Port for OIDC redirects
 
-Edit `/etc/httpd/conf.d/ood-npm-trust.conf`:
+Create `/etc/httpd/conf.d/ood-npm-trust.conf`:
 
 ```bash
 sudo tee /etc/httpd/conf.d/ood-npm-trust.conf > /dev/null <<EOF
@@ -455,6 +478,11 @@ RemoteIPInternalProxy ${NPM_IP}
 
 # Preserve original protocol from NPM
 SetEnvIf X-Forwarded-Proto https HTTPS=on
+
+# Ensure headers are preserved
+RequestHeader set X-Forwarded-Host "%{HTTP_X_FORWARDED_HOST}e"
+RequestHeader set X-Forwarded-For "%{HTTP_X_FORWARDED_FOR}e"
+RequestHeader set X-Forwarded-Proto "%{HTTP_X_FORWARDED_PROTO}e"
 EOF
 ```
 
@@ -557,8 +585,13 @@ sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 ```
 
 **Common issue: Redirect URI mismatch**
-- Check Azure AD app has redirect URI: `https://${PUBLIC_HOSTNAME}/oidc`
-- NOT `https://${OOD_HOSTNAME}/oidc`
+- Azure AD shows error: "AADSTS50011: The reply URL specified in the request does not match..."
+- **FIX:** Go to Azure Portal → App registrations → OpenOnDemand → Authentication → Redirect URIs
+- Add the **exact** URI with port that OOD is using:
+  ```
+  https://ondemand.cn.creekside.network:58443/oidc
+  ```
+- The port **must match** what's in `oidc_redirect_uri` in `/etc/ood/config/ood_portal.yml`
 
 ### Squid Connectivity Issues
 
