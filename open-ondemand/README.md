@@ -108,20 +108,55 @@ Key points:
 
 #### Advanced Nginx Configuration (for Non-Standard Ports)
 
-If you're using a **non-standard port** (e.g., `https://ondemand.example.com:58443`), add this to NPM's **Advanced → Custom Nginx Configuration**:
+If you're using a **non-standard port** (e.g., `https://ondemand.example.com:58443`), you must complete three steps:
+
+**STEP 1: Make Apache listen on the non-standard port** on the OOD server.
+
+Add to `/etc/httpd/conf.d/ssl.conf`:
+
+```bash
+sudo tee -a /etc/httpd/conf.d/ssl.conf > /dev/null <<EOF
+Listen 58443 https
+EOF
+```
+
+Restart Apache:
+
+```bash
+sudo systemctl restart httpd
+```
+
+Verify:
+
+```bash
+sudo ss -tlnp | grep httpd
+```
+
+**STEP 2: Update OOD portal configuration** to use the external port.
+
+In `/etc/ood/config/ood_portal.yml`, set `port` to your external port:
+
+```yaml
+port: 58443
+```
+
+Regenerate the Apache config:
+
+```bash
+sudo /opt/ood/ood-portal-generator/sbin/update_ood_portal
+sudo systemctl restart httpd
+```
+
+**STEP 3: Configure NPM to rewrite Location headers** with the port.
+
+Edit `/opt/nginx-proxy-manager/npm/data/nginx/proxy_host/2.conf` and use this location block:
 
 ```nginx
 location / {
     # Set the REAL external port here (change 58443 to your port)
     set $external_port 58443;
-    set $forwarded_host $host;
-    
-    # If the request didn't come with a port, add the external port
-    if ($forwarded_host !~ :) {
-        set $forwarded_host $host:$external_port;
-    }
 
-    proxy_pass https://10.1.41.100:443;
+    proxy_pass https://10.1.41.100:58443;
     
     # Standard headers
     proxy_set_header Host $host;
@@ -129,12 +164,14 @@ location / {
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto https;
     
-    # CRITICAL: Tell OOD the internet-facing port and full hostname:port
+    # CRITICAL: Tell OOD the internet-facing port (prevents redirect to internal hostname)
     proxy_set_header X-Forwarded-Port $external_port;
-    proxy_set_header X-Forwarded-Host $forwarded_host;
-    
-    # Also set the server port for mod_auth_openidc to use
-    proxy_set_header X-Server-Port $external_port;
+    proxy_set_header X-Forwarded-Host $host:$external_port;
+
+    # CRITICAL: Rewrite Location headers to include the port
+    # This fixes browser redirects to use the external port instead of default 443
+    proxy_redirect https://$host/ https://$host:$external_port/;
+    proxy_redirect http://$host/ https://$host:$external_port/;
 
     # Buffer sizes for OIDC tokens
     proxy_buffer_size 128k;
@@ -149,7 +186,16 @@ location / {
 }
 ```
 
-**NOTE:** Replace `58443` with your actual external port. This configuration ensures OOD redirects back to the correct public URL instead of the internal hostname.
+Reload Nginx in NPM:
+
+```bash
+sudo docker exec npm nginx -s reload
+```
+
+**WHY ALL THREE STEPS ARE NECESSARY:**
+- **Step 1:** Apache must listen on the non-standard port
+- **Step 2:** OOD portal generator creates VirtualHost on that port and sets OIDC redirect URI correctly
+- **Step 3:** NPM's `proxy_redirect` directives rewrite HTTP Location headers to include the port in redirects (critical for OIDC flow)
 
 ### 3.2 Squid Proxy Deployment
 
@@ -271,26 +317,33 @@ sudo chmod 600 /etc/pki/tls/private/ood.key
 - Account type: **Single tenant**
 - Platform: **Web**
 
-### Redirect URI (CRITICAL)
+### Redirect URI (CRITICAL - MUST MATCH EXACTLY)
 
-**MUST include the external port and match exactly what mod_auth_openidc uses:**
+**IMPORTANT:** The redirect URI registered in Azure AD must match **exactly** what OOD sends during the OIDC flow. For non-standard ports, this includes the port number AND trailing slash.
 
-For non-standard ports, register the full URL with port:
+**For non-standard ports:**
 ```
-https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}/oidc
+https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}/oidc/
 ```
 
-For standard port 443:
+**For standard port 443 (no port suffix):**
 ```
-https://${PUBLIC_HOSTNAME}/oidc
+https://${PUBLIC_HOSTNAME}/oidc/
 ```
 
 **Example for port 58443:**
 ```
-https://ondemand.cn.creekside.network:58443/oidc
+https://ondemand.cn.creekside.network:58443/oidc/
 ```
 
-> Azure AD **must have this exact redirect URI** or OIDC will fail with "redirect_uri mismatch"
+**If you get error AADSTS50011** (redirect URI mismatch):
+1. Check the exact URL in the error message from Azure AD
+2. Go to **Azure Portal → App registrations → [Your App] → Authentication → Redirect URIs**
+3. Add/update the URI to match **exactly** (including port and trailing slash)
+4. Click **Save**
+5. Try logging in again
+
+> **Troubleshooting tip:** Check browser DevTools → Network tab during login. The redirect URL will show in the HTTP request headers.
 
 ### API Permissions
 
@@ -425,7 +478,8 @@ sudo vi /etc/ood/config/ood_portal.yml
 
 ```bash
 sudo tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
-# Use PUBLIC hostname and external port
+# CRITICAL: Use PUBLIC hostname and EXTERNAL port (what browsers see)
+# NOT the internal hostname or internal port
 servername: ${PUBLIC_HOSTNAME}
 port: ${PUBLIC_PORT}
 
@@ -462,7 +516,7 @@ EOF
 ---
 
 ## 11. Add NPM Trust Headers & Port Reconstruction
-
+0
 Since NPM is the reverse proxy and uses a non-standard port, Apache needs to:
 1. Trust headers from NPM
 2. Reconstruct the full URL (with port) from X-Forwarded-Port for OIDC redirects
@@ -488,7 +542,23 @@ EOF
 
 ---
 
-## 12. Generate Apache Config (MANDATORY)
+## 12. Configure Apache to Listen on Port (If Non-Standard)
+
+**Important:** If using a non-standard port (not 443), make sure Apache listens on it:
+
+```bash
+sudo grep "^Listen" /etc/httpd/conf.d/ssl.conf
+```
+
+If your port is missing, add it:
+
+```bash
+sudo tee -a /etc/httpd/conf.d/ssl.conf > /dev/null <<EOF
+Listen 58443 https
+EOF
+```
+
+## 13. Generate Apache Config (MANDATORY)
 
 ```bash
 sudo /opt/ood/ood-portal-generator/sbin/update_ood_portal
@@ -498,15 +568,26 @@ sudo /opt/ood/ood-portal-generator/sbin/update_ood_portal
 sudo systemctl restart httpd
 ```
 
-Verify:
+Verify Apache is listening on the correct port:
+
+```bash
+sudo ss -tlnp | grep httpd
+```
+
+Verify VirtualHost configuration:
 
 ```bash
 sudo apachectl -S
 ```
 
+You should see:
+```
+*:58443                ondemand.cn.creekside.network (/etc/httpd/conf.d/ood-portal.conf:xx)
+```
+
 ---
 
-## 13. Test Login
+## 14. Test Login
 
 ### Step 1: Verify Network Connectivity
 
@@ -576,7 +657,7 @@ sudo tail -f /var/log/squid/access.log | grep login.microsoftonline
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 ### OIDC Errors
 
@@ -584,14 +665,30 @@ sudo tail -f /var/log/squid/access.log | grep login.microsoftonline
 sudo tail -50 /var/log/httpd/error_log | grep -i oidc
 ```
 
-**Common issue: Redirect URI mismatch**
-- Azure AD shows error: "AADSTS50011: The reply URL specified in the request does not match..."
-- **FIX:** Go to Azure Portal → App registrations → OpenOnDemand → Authentication → Redirect URIs
-- Add the **exact** URI with port that OOD is using:
-  ```
-  https://ondemand.cn.creekside.network:58443/oidc
-  ```
-- The port **must match** what's in `oidc_redirect_uri` in `/etc/ood/config/ood_portal.yml`
+**Common issue 1: Redirect URI mismatch (AADSTS50011)**
+
+Error message:
+```
+AADSTS50011: The redirect URI 'https://ondemand.example.com:58443/oidc/' specified 
+in the request does not match the redirect URIs configured for the application.
+```
+
+**FIX:**
+1. Go to **Azure Portal → App registrations → [Your App] → Authentication → Redirect URIs**
+2. Add/update the redirect URI to match **exactly** what the error shows (including port and trailing slash)
+3. Example:
+   ```
+   https://ondemand.cn.creekside.network:58443/oidc/
+   ```
+4. Click **Save**
+5. Try logging in again
+
+**Common issue 2: Redirect goes to wrong port**
+
+If the browser is redirected to `https://hostname/` instead of `https://hostname:58443/`:
+- **Cause:** NPM is not rewriting Location headers with the port
+- **FIX:** Ensure NPM config has `proxy_redirect` directives (see section 3.1)
+- **Verify:** `curl -v https://hostname:58443/ | grep location` should show the port in the Location header
 
 ### Squid Connectivity Issues
 
@@ -651,7 +748,7 @@ sudo setenforce 1  # Re-enable
 
 ---
 
-## 15. Recommended Next Steps
+## 16. Recommended Next Steps
 
 - Enforce MFA with Conditional Access
 - Restrict Entra app to allowed users/groups
@@ -661,7 +758,7 @@ sudo setenforce 1  # Re-enable
 
 ---
 
-## 16. Tips:
+## 17. Tips:
 
 1) Chrony service fix on LXD Rocky containers
 ```bash
