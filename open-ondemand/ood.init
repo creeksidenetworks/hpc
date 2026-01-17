@@ -31,6 +31,15 @@ PUBLIC_PORT=443
 # Squid Proxy Hostname
 SQUID_HOSTNAME=squid.example.local
 
+# Authentication Method: "entra-id" or "keycloak"
+# Choose one authentication provider
+AUTH_METHOD=entra-id
+
+# ============================================================================
+# AZURE AD (Entra ID) CONFIGURATION
+# Uncomment and fill these if AUTH_METHOD=entra-id
+# ============================================================================
+
 # Azure AD Tenant ID (from Azure Portal)
 AZURE_TENANT_ID=your-tenant-id-here
 
@@ -39,3 +48,20 @@ AZURE_CLIENT_ID=your-client-id-here
 
 # Azure AD Client Secret (from App Registration)
 AZURE_CLIENT_SECRET=your-client-secret-here
+
+# ============================================================================
+# KEYCLOAK CONFIGURATION
+# Uncomment and fill these if AUTH_METHOD=keycloak
+# ============================================================================
+
+# Keycloak URL (e.g., https://keycloak.example.com:8443 or https://keycloak.example.local)
+# KEYCLOAK_URL=https://keycloak.example.com
+
+# Keycloak Realm name (default: master)
+# KEYCLOAK_REALM=master
+
+# Keycloak Client ID (created in admin console)
+# KEYCLOAK_CLIENT_ID=ondemand
+
+# Keycloak Client Secret (from client credentials)
+# KEYCLOAK_CLIENT_SECRET=your-keycloak-secret-here

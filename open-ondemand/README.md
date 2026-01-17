@@ -1,13 +1,19 @@
 # Open OnDemand on Rocky Linux with NPM & Squid Proxy
 
-**Authentication:** Microsoft Entra ID (MS365) via OIDC  \
 **Linux Identity:** FreeIPA (`example.local`)  \
-**Public URL:** https://ondemand.example.com  
-**Internal Hostname:** `ood.example.local` (unchanged)  
+**Public URL:** https://ondemand.example.com or https://ondemand.example.com:58443  
+**Internal Hostname:** `ood.example.local` (unchanged)  \
 **Internal IP:** `10.1.41.100`
 **Reverse Proxy:** NGINX Proxy Manager at `10.1.43.100`  \
 **Outbound Proxy:** Squid at `10.1.43.100`  \
-**SSL:** Let's Encrypt (handled by NPM)
+**SSL:** Let's Encrypt (handled by NPM for public), self-signed on OOD
+
+## Authentication Options
+
+Choose one authentication method:
+
+1. **[Microsoft Entra ID (Azure AD)](#part-a-microsoft-entra-id-azure-ad-oidc-authentication)** - Via Microsoft 365
+2. **[Keycloak](#part-b-keycloak-oidc-authentication)** - Self-hosted identity provider
 
 ---
 
@@ -32,10 +38,20 @@ export PUBLIC_HOSTNAME="ondemand.${DOMAIN_COM}"
 export PUBLIC_PORT="443"  # Change to your NPM external port (e.g., 58443 for non-standard)
 export SQUID_HOSTNAME="squid.${DOMAIN_LOCAL}"
 
-# Azure AD (update with your values)
+# CHOOSE ONE AUTHENTICATION METHOD:
+
+# ===== OPTION 1: Microsoft Entra ID (Azure AD) =====
+export AUTH_METHOD="entra-id"
 export AZURE_TENANT_ID="your-tenant-id"
 export AZURE_CLIENT_ID="your-client-id"
 export AZURE_CLIENT_SECRET="your-client-secret"
+
+# ===== OPTION 2: Keycloak =====
+# export AUTH_METHOD="keycloak"
+# export KEYCLOAK_URL="https://keycloak.example.com:8443"  # or port 8080 for non-HTTPS
+# export KEYCLOAK_REALM="master"
+# export KEYCLOAK_CLIENT_ID="ondemand"
+# export KEYCLOAK_CLIENT_SECRET="your-client-secret"
 ```
 
 Once exported, you can copy and run all commands directly. For example:
@@ -44,7 +60,7 @@ Once exported, you can copy and run all commands directly. For example:
 
 ---
 
-## 1. Architecture Overview
+## PART A: Microsoft Entra ID (Azure AD) OIDC Authentication
 
 ```
 Browser / Internet
@@ -748,10 +764,301 @@ sudo setenforce 1  # Re-enable
 
 ---
 
+## PART B: Keycloak OIDC Authentication
+
+Keycloak is a self-hosted open-source identity provider. Use this section if you prefer to manage authentication with your own Keycloak instance instead of Azure AD.
+
+### Architecture with Keycloak
+
+```
+Browser / Internet
+  ↓
+NGINX Proxy Manager (10.1.43.100)
+(Public SSL termination + reverse proxy)
+  ↓ HTTPS
+Open OnDemand (10.1.41.100)
+(Apache + mod_auth_openidc)
+  ↓ OIDC
+Keycloak (internal or external)
+(Identity provider - your own server)
+  ↓
+FreeIPA / SSSD (example.local)
+  
+OOD Outbound Traffic:
+  ↓
+Squid Proxy (10.1.43.100)
+  ↓
+Internet (for Keycloak if external)
+```
+
+### B.1 Keycloak Setup Requirements
+
+- Keycloak instance deployed (internal or external)
+- HTTPS accessibility from OOD server (through Squid if needed)
+- Realm and client created
+- OOD registered as a client in Keycloak
+
+### B.2 Configure Keycloak for OOD
+
+**1. Create a new Realm (or use existing):**
+- Log in to Keycloak Admin Console
+- Create realm: `example` (or use default `master`)
+
+**2. Create Client for OOD:**
+- Go to Clients → Create
+- Client ID: `ondemand`
+- Client Protocol: `openid-connect`
+- Access Type: `confidential`
+
+**3. Configure Client:**
+- **Valid Redirect URIs:**
+  ```
+  https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}/oidc/
+  ```
+  Example for port 58443:
+  ```
+  https://ondemand.example.com:58443/oidc/
+  ```
+
+- **Web Origins:**
+  ```
+  https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}
+  ```
+
+- **Access Type:** `confidential`
+- **Standard Flow Enabled:** ON
+- **Implicit Flow Enabled:** OFF
+- **Direct Access Grants Enabled:** OFF
+
+**4. Get Credentials:**
+- Click **Credentials** tab
+- Copy **Client Secret**
+- Note: Client ID is `ondemand`
+
+### B.3 Configure Squid Proxy for Keycloak Access
+
+If Keycloak is external, OOD needs to reach it through Squid.
+
+Create `/etc/httpd/conf.d/ood-keycloak-proxy.conf`:
+
+```bash
+sudo tee /etc/httpd/conf.d/ood-keycloak-proxy.conf > /dev/null <<EOF
+# Allow Keycloak HTTPS access through Squid
+# If Keycloak is internal, this may not be needed
+SetEnv http_proxy http://${SQUID_HOSTNAME}:3128
+SetEnv https_proxy http://${SQUID_HOSTNAME}:3128
+EOF
+```
+
+### B.4 Verify Keycloak Connectivity
+
+From OOD server:
+
+```bash
+export https_proxy=http://${SQUID_HOSTNAME}:3128
+```
+
+```bash
+curl -v https://${KEYCLOAK_URL}/.well-known/openid-configuration | head -20
+```
+
+Should return JSON with OIDC endpoints.
+
+### B.5 Create User Mapping Script for Keycloak
+
+Keycloak can send username in different claims. Create a mapping script:
+
+```bash
+sudo mkdir -p /opt/ood/site
+```
+
+```bash
+sudo tee /opt/ood/site/custom-user-mapping-keycloak.sh > /dev/null <<EOF
+#!/bin/bash
+
+function urldecode() { : "\${*//+/ }"; echo -e "\${_//%/\\\\x}"; }
+
+# Keycloak sends username claim (can be email or preferred_username)
+# This example assumes username in format: user or user@realm
+INPUT_USER=\$(urldecode \$1)
+
+# Remove realm suffix if present (e.g., user@keycloak → user)
+USERNAME="\${INPUT_USER%%@*}"
+
+# Convert to lowercase
+echo "\$USERNAME" | tr '[:upper:]' '[:lower:]'
+EOF
+
+chmod +x /opt/ood/site/custom-user-mapping-keycloak.sh
+```
+
+### B.6 Configure OOD for Keycloak OIDC
+
+Edit `/etc/ood/config/ood_portal.yml`:
+
+```bash
+sudo tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
+# CRITICAL: Use PUBLIC hostname and EXTERNAL port (what browsers see)
+servername: ${PUBLIC_HOSTNAME}
+port: ${PUBLIC_PORT}
+
+ssl:
+  - 'SSLCertificateFile /etc/pki/tls/certs/ood.crt'
+  - 'SSLCertificateKeyFile /etc/pki/tls/private/ood.key'
+
+auth:
+  - 'AuthType openid-connect'
+  - 'Require valid-user'
+
+oidc_uri: /oidc/
+
+# Keycloak OIDC Configuration
+# Replace with your Keycloak instance URL and realm
+oidc_provider_metadata_url: 'https://${KEYCLOAK_URL}/auth/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration'
+
+oidc_client_id: '${KEYCLOAK_CLIENT_ID}'
+oidc_client_secret: '${KEYCLOAK_CLIENT_SECRET}'
+
+# Keycloak sends 'preferred_username' by default
+# Adjust if you have custom claims
+oidc_remote_user_claim: preferred_username
+
+oidc_scope: 'openid profile email'
+
+oidc_session_inactivity_timeout: 28800
+oidc_session_max_duration: 28800
+oidc_state_max_number_of_cookies: 10
+oidc_cookie_same_site: 'On'
+
+# Use Keycloak-specific mapping script
+user_map_cmd: '/opt/ood/site/custom-user-mapping-keycloak.sh'
+
+user_env:
+  REMOTE_USER
+EOF
+```
+
+**Key differences from Azure AD:**
+- `oidc_provider_metadata_url` points to Keycloak realm
+- `oidc_remote_user_claim` is typically `preferred_username` (not `email`)
+- Different mapping script that handles Keycloak username format
+
+### B.7 Generate Apache Configuration
+
+```bash
+sudo /opt/ood/ood-portal-generator/sbin/update_ood_portal
+```
+
+```bash
+sudo systemctl restart httpd
+```
+
+Verify:
+
+```bash
+sudo apachectl -S | grep -i keycloak
+```
+
+### B.8 Configure NPM for Keycloak OOD Proxy
+
+Same as Azure AD approach. Update NPM proxy config:
+
+```nginx
+location / {
+    set $external_port ${PUBLIC_PORT};
+    proxy_pass https://10.1.41.100:${PUBLIC_PORT};
+    
+    # Standard headers
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    
+    # CRITICAL: Keycloak port handling
+    proxy_set_header X-Forwarded-Port $external_port;
+    proxy_set_header X-Forwarded-Host $host:$external_port;
+
+    # Rewrite Location headers for non-standard ports
+    proxy_redirect https://$host/ https://$host:$external_port/;
+    proxy_redirect http://$host/ https://$host:$external_port/;
+
+    # Buffers and timeouts
+    proxy_buffer_size 128k;
+    proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+```
+
+Reload NPM:
+
+```bash
+sudo docker exec npm nginx -s reload
+```
+
+### B.9 Troubleshooting Keycloak OIDC
+
+**OIDC Metadata Not Found:**
+
+```bash
+export https_proxy=http://${SQUID_HOSTNAME}:3128
+curl -v https://${KEYCLOAK_URL}/auth/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration
+```
+
+Should return JSON. If 404, check:
+- Keycloak URL is correct
+- Realm name is correct
+- Keycloak is accessible from OOD server
+
+**Login Redirect Loop:**
+
+Keycloak might not trust the redirect URI. Check:
+1. Keycloak Client → Valid Redirect URIs includes exact URL with port
+2. Web Origins includes `https://${PUBLIC_HOSTNAME}:${PUBLIC_PORT}`
+3. Client protocol is `openid-connect`
+
+**Username Not Mapping Correctly:**
+
+Check what claim Keycloak sends:
+
+```bash
+sudo tail -f /var/log/httpd/error_log | grep -i "oidc\|map"
+```
+
+Adjust `oidc_remote_user_claim` in `ood_portal.yml` if needed:
+- `preferred_username` - Username (default)
+- `email` - Email address
+- Custom claim name - If you configured custom claims
+
+**User Not Found in FreeIPA:**
+
+Ensure the username that Keycloak sends matches FreeIPA:
+
+```bash
+id username@${DOMAIN_LOCAL}
+```
+
+If not found, adjust the user mapping script to match your Keycloak username format.
+
+---
+
 ## 16. Recommended Next Steps
 
+**For Entra ID:**
 - Enforce MFA with Conditional Access
 - Restrict Entra app to allowed users/groups
+
+**For Keycloak:**
+- Configure user federation (LDAP/FreeIPA sync)
+- Set up password policies
+- Enable MFA
+- Configure roles and permissions
+
+**For both:**
 - Configure Slurm / PBS
 - Enable Interactive Desktop (TurboVNC / noVNC)
 - Add NFS-backed home directories

@@ -50,6 +50,15 @@ log "Reading configuration from: ${CONFIG_FILE}"
 # Source the configuration file
 source "$CONFIG_FILE"
 
+# Validate AUTH_METHOD
+if [[ -z "$AUTH_METHOD" ]]; then
+    error "AUTH_METHOD not set in ood.init. Must be 'entra-id' or 'keycloak'"
+fi
+
+if [[ "$AUTH_METHOD" != "entra-id" ]] && [[ "$AUTH_METHOD" != "keycloak" ]]; then
+    error "Invalid AUTH_METHOD: $AUTH_METHOD. Must be 'entra-id' or 'keycloak'"
+fi
+
 # Validate all required variables are present and not empty
 missing_vars=()
 
@@ -64,9 +73,6 @@ required_vars=(
     "PUBLIC_HOSTNAME"
     "PUBLIC_PORT"
     "SQUID_HOSTNAME"
-    "AZURE_TENANT_ID"
-    "AZURE_CLIENT_ID"
-    "AZURE_CLIENT_SECRET"
 )
 
 for var in "${required_vars[@]}"; do
@@ -75,11 +81,36 @@ for var in "${required_vars[@]}"; do
     fi
 done
 
-# Check for placeholder values in Azure credentials
-if [[ "$AZURE_TENANT_ID" == "your-tenant-id-here" ]] || \
-   [[ "$AZURE_CLIENT_ID" == "your-client-id-here" ]] || \
-   [[ "$AZURE_CLIENT_SECRET" == "your-client-secret-here" ]]; then
-    missing_vars+=("Azure AD credentials (currently set to placeholder values)")
+# Validate auth-specific variables
+if [[ "$AUTH_METHOD" == "entra-id" ]]; then
+    auth_vars=("AZURE_TENANT_ID" "AZURE_CLIENT_ID" "AZURE_CLIENT_SECRET")
+    for var in "${auth_vars[@]}"; do
+        if [[ -z "${!var}" ]]; then
+            missing_vars+=("$var")
+        fi
+    done
+    
+    # Check for placeholder values
+    if [[ "$AZURE_TENANT_ID" == "your-tenant-id-here" ]] || \
+       [[ "$AZURE_CLIENT_ID" == "your-client-id-here" ]] || \
+       [[ "$AZURE_CLIENT_SECRET" == "your-client-secret-here" ]]; then
+        missing_vars+=("Azure AD credentials (currently set to placeholder values)")
+    fi
+elif [[ "$AUTH_METHOD" == "keycloak" ]]; then
+    auth_vars=("KEYCLOAK_URL" "KEYCLOAK_REALM" "KEYCLOAK_CLIENT_ID" "KEYCLOAK_CLIENT_SECRET")
+    for var in "${auth_vars[@]}"; do
+        if [[ -z "${!var}" ]]; then
+            missing_vars+=("$var")
+        fi
+    done
+    
+    # Check for placeholder values
+    if [[ "$KEYCLOAK_URL" == "your-keycloak-url-here" ]] || \
+       [[ "$KEYCLOAK_REALM" == "your-realm-here" ]] || \
+       [[ "$KEYCLOAK_CLIENT_ID" == "your-client-id-here" ]] || \
+       [[ "$KEYCLOAK_CLIENT_SECRET" == "your-client-secret-here" ]]; then
+        missing_vars+=("Keycloak credentials (currently set to placeholder values)")
+    fi
 fi
 
 # If any variables are missing, display error and exit
@@ -90,20 +121,18 @@ ${missing_vars[@]}
 
 Please edit ood.init and provide all required values.
 
-Example:
-  DOMAIN_LOCAL=example.local
-  DOMAIN_COM=example.com
-  EMAIL_DOMAIN=example.com
-  OOD_IP=10.1.41.100
-  NPM_IP=10.1.43.100
-  SQUID_IP=10.1.43.100
-  OOD_HOSTNAME=ood.example.local
-  PUBLIC_HOSTNAME=ondemand.example.com
-  PUBLIC_PORT=443
-  SQUID_HOSTNAME=squid.example.local
+For Entra ID:
+  AUTH_METHOD=entra-id
   AZURE_TENANT_ID=your-actual-tenant-id
   AZURE_CLIENT_ID=your-actual-client-id
-  AZURE_CLIENT_SECRET=your-actual-client-secret"
+  AZURE_CLIENT_SECRET=your-actual-client-secret
+
+For Keycloak:
+  AUTH_METHOD=keycloak
+  KEYCLOAK_URL=https://keycloak.example.com
+  KEYCLOAK_REALM=master
+  KEYCLOAK_CLIENT_ID=ondemand
+  KEYCLOAK_CLIENT_SECRET=your-actual-secret"
 fi
 
 # Export all variables
@@ -117,9 +146,18 @@ export OOD_HOSTNAME
 export PUBLIC_HOSTNAME
 export PUBLIC_PORT
 export SQUID_HOSTNAME
-export AZURE_TENANT_ID
-export AZURE_CLIENT_ID
-export AZURE_CLIENT_SECRET
+export AUTH_METHOD
+
+if [[ "$AUTH_METHOD" == "entra-id" ]]; then
+    export AZURE_TENANT_ID
+    export AZURE_CLIENT_ID
+    export AZURE_CLIENT_SECRET
+elif [[ "$AUTH_METHOD" == "keycloak" ]]; then
+    export KEYCLOAK_URL
+    export KEYCLOAK_REALM
+    export KEYCLOAK_CLIENT_ID
+    export KEYCLOAK_CLIENT_SECRET
+fi
 
 success "Configuration loaded successfully"
 
@@ -144,10 +182,21 @@ echo "  NPM Server IP: ${NPM_IP}"
 echo "  Squid Proxy IP: ${SQUID_IP}"
 echo "  Squid Hostname: ${SQUID_HOSTNAME}"
 echo ""
-echo "Azure AD Configuration:"
-echo "  Tenant ID: ${AZURE_TENANT_ID}"
-echo "  Client ID: ${AZURE_CLIENT_ID}"
-echo "  Client Secret: $(echo ${AZURE_CLIENT_SECRET} | cut -c1-10)... (hidden)"
+echo "Authentication Method: ${AUTH_METHOD}"
+if [[ "$AUTH_METHOD" == "entra-id" ]]; then
+    echo ""
+    echo "Azure AD Configuration:"
+    echo "  Tenant ID: ${AZURE_TENANT_ID}"
+    echo "  Client ID: ${AZURE_CLIENT_ID}"
+    echo "  Client Secret: $(echo ${AZURE_CLIENT_SECRET} | cut -c1-10)... (hidden)"
+elif [[ "$AUTH_METHOD" == "keycloak" ]]; then
+    echo ""
+    echo "Keycloak Configuration:"
+    echo "  Server URL: ${KEYCLOAK_URL}"
+    echo "  Realm: ${KEYCLOAK_REALM}"
+    echo "  Client ID: ${KEYCLOAK_CLIENT_ID}"
+    echo "  Client Secret: $(echo ${KEYCLOAK_CLIENT_SECRET} | cut -c1-10)... (hidden)"
+fi
 echo ""
 echo "Email Domain (for user mapping):"
 echo "  ${EMAIL_DOMAIN}"
@@ -303,6 +352,7 @@ log "==============================================="
 
 mkdir -p /opt/ood/site
 
+# Always create Entra ID user mapping script (in case of switching)
 tee /opt/ood/site/custom-user-mapping.sh > /dev/null <<EOF
 #!/bin/bash
 
@@ -321,7 +371,27 @@ fi
 EOF
 
 chmod +x /opt/ood/site/custom-user-mapping.sh
-success "User mapping script created"
+success "Entra ID user mapping script created"
+
+# Create Keycloak user mapping script for username-based mapping
+tee /opt/ood/site/custom-user-mapping-keycloak.sh > /dev/null <<EOF
+#!/bin/bash
+
+function urldecode() { : "\${*//+/ }"; echo -e "\${_//%/\\\\x}"; }
+
+# Keycloak sends username claim (can be email or preferred_username)
+# This example assumes username in format: user or user@realm
+INPUT_USER=\$(urldecode \$1)
+
+# Remove realm suffix if present (e.g., user@keycloak → user)
+USERNAME="\${INPUT_USER%%@*}"
+
+# Convert to lowercase
+echo "\$USERNAME" | tr '[:upper:]' '[:lower:]'
+EOF
+
+chmod +x /opt/ood/site/custom-user-mapping-keycloak.sh
+success "Keycloak user mapping script created"
 
 ################################################################################
 # SECTION 9: CONFIGURE NPM TRUST HEADERS
@@ -375,7 +445,10 @@ log "==============================================="
 log "Step 11: Configuring Open OnDemand OIDC"
 log "==============================================="
 
-tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
+# Generate OOD portal configuration based on AUTH_METHOD
+if [[ "$AUTH_METHOD" == "entra-id" ]]; then
+    log "Configuring for Microsoft Entra ID (Azure AD)"
+    tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
 # CRITICAL: Use PUBLIC hostname and EXTERNAL port (what browsers see)
 # NOT the internal hostname or internal port
 servername: ${PUBLIC_HOSTNAME}
@@ -409,7 +482,45 @@ user_env:
   REMOTE_USER
 EOF
 
-success "OOD portal YAML configured"
+elif [[ "$AUTH_METHOD" == "keycloak" ]]; then
+    log "Configuring for Keycloak"
+    tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
+# CRITICAL: Use PUBLIC hostname and EXTERNAL port (what browsers see)
+# NOT the internal hostname or internal port
+servername: ${PUBLIC_HOSTNAME}
+port: ${PUBLIC_PORT}
+
+# Use the self-signed certificate we created
+ssl:
+  - 'SSLCertificateFile /etc/pki/tls/certs/ood.crt'
+  - 'SSLCertificateKeyFile /etc/pki/tls/private/ood.key'
+
+auth:
+  - 'AuthType openid-connect'
+  - 'Require valid-user'
+
+oidc_uri: /oidc/
+oidc_provider_metadata_url: '${KEYCLOAK_URL}/auth/realms/${KEYCLOAK_REALM}/.well-known/openid-configuration'
+oidc_client_id: '${KEYCLOAK_CLIENT_ID}'
+oidc_client_secret: '${KEYCLOAK_CLIENT_SECRET}'
+
+oidc_scope: 'openid profile email'
+oidc_remote_user_claim: preferred_username
+
+oidc_session_inactivity_timeout: 28800
+oidc_session_max_duration: 28800
+oidc_state_max_number_of_cookies: 10
+oidc_cookie_same_site: 'On'
+
+user_map_cmd: '/opt/ood/site/custom-user-mapping-keycloak.sh'
+
+user_env:
+  REMOTE_USER
+EOF
+
+fi
+
+success "OOD portal YAML configured for ${AUTH_METHOD}"
 
 ################################################################################
 # SECTION 12: GENERATE APACHE CONFIG
@@ -463,10 +574,18 @@ else
 fi
 
 # Check user mapping script
-if [[ -x /opt/ood/site/custom-user-mapping.sh ]]; then
-    success "User mapping script is executable"
-else
-    error "User mapping script not executable"
+if [[ "$AUTH_METHOD" == "entra-id" ]]; then
+    if [[ -x /opt/ood/site/custom-user-mapping.sh ]]; then
+        success "Entra ID user mapping script is executable"
+    else
+        error "Entra ID user mapping script not executable"
+    fi
+elif [[ "$AUTH_METHOD" == "keycloak" ]]; then
+    if [[ -x /opt/ood/site/custom-user-mapping-keycloak.sh ]]; then
+        success "Keycloak user mapping script is executable"
+    else
+        error "Keycloak user mapping script not executable"
+    fi
 fi
 
 ################################################################################
