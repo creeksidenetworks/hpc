@@ -277,7 +277,8 @@ sudo chmod +x /etc/profile.d/squid-proxy.sh
 
 Create `/etc/httpd/conf.d/ood-squid-proxy.conf`:
 
-```apache
+```bash
+sudo tee /etc/httpd/conf.d/ood-squid-proxy.conf > /dev/null <<EOF
 # Environment variables for Apache processes to use Squid
 SetEnv http_proxy http://${SQUID_HOSTNAME}:3128
 SetEnv https_proxy http://${SQUID_HOSTNAME}:3128
@@ -285,6 +286,7 @@ SetEnv HTTP_PROXY http://${SQUID_HOSTNAME}:3128
 SetEnv HTTPS_PROXY http://${SQUID_HOSTNAME}:3128
 SetEnv no_proxy localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
 SetEnv NO_PROXY localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
+EOF
 ```
 
 ### 8.3 Verify Squid Connectivity
