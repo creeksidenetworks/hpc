@@ -264,8 +264,8 @@ export http_proxy=http://${SQUID_HOSTNAME}:3128
 export https_proxy=http://${SQUID_HOSTNAME}:3128
 export HTTP_PROXY=http://${SQUID_HOSTNAME}:3128
 export HTTPS_PROXY=http://${SQUID_HOSTNAME}:3128
-export no_proxy=localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
-export NO_PROXY=localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
+export no_proxy=localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
+export NO_PROXY=localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
 EOF
 ```
 
@@ -283,8 +283,8 @@ SetEnv http_proxy http://${SQUID_HOSTNAME}:3128
 SetEnv https_proxy http://${SQUID_HOSTNAME}:3128
 SetEnv HTTP_PROXY http://${SQUID_HOSTNAME}:3128
 SetEnv HTTPS_PROXY http://${SQUID_HOSTNAME}:3128
-SetEnv no_proxy localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
-SetEnv NO_PROXY localhost,127.0.0.1,10.180.0.0/16,.${DOMAIN_LOCAL}
+SetEnv no_proxy localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
+SetEnv NO_PROXY localhost,127.0.0.1,10.0.0.0/8,.${DOMAIN_LOCAL}
 ```
 
 ### 8.3 Verify Squid Connectivity
