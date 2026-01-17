@@ -1,0 +1,41 @@
+# Open OnDemand Configuration File
+# Copy this file to the same directory as setup.sh and customize the values
+
+# FreeIPA Domain (local)
+DOMAIN_LOCAL=example.local
+
+# Public Domain (com)
+DOMAIN_COM=example.com
+
+# Email domain (used for user mapping)
+EMAIL_DOMAIN=example.com
+
+# Open OnDemand Server IP
+OOD_IP=10.1.41.100
+
+# NGINX Proxy Manager IP
+NPM_IP=10.1.43.100
+
+# Squid Proxy IP (can be same as NPM_IP)
+SQUID_IP=10.1.43.100
+
+# OOD Internal Hostname
+OOD_HOSTNAME=ood.example.local
+
+# Public-facing Hostname (what users access)
+PUBLIC_HOSTNAME=ondemand.example.com
+
+# Public-facing Port (443 for standard HTTPS, or custom like 58443)
+PUBLIC_PORT=443
+
+# Squid Proxy Hostname
+SQUID_HOSTNAME=squid.example.local
+
+# Azure AD Tenant ID (from Azure Portal)
+AZURE_TENANT_ID=your-tenant-id-here
+
+# Azure AD Client ID (from App Registration)
+AZURE_CLIENT_ID=your-client-id-here
+
+# Azure AD Client Secret (from App Registration)
+AZURE_CLIENT_SECRET=your-client-secret-here
