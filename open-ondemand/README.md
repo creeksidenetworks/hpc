@@ -29,6 +29,7 @@ export SQUID_IP="10.1.43.100"
 # Hostnames
 export OOD_HOSTNAME="ood.${DOMAIN_LOCAL}"
 export PUBLIC_HOSTNAME="ondemand.${DOMAIN_COM}"
+export PUBLIC_PORT="443"  # Change to your NPM external port (e.g., 58443 for non-standard)
 export SQUID_HOSTNAME="squid.${DOMAIN_LOCAL}"
 
 # Azure AD (update with your values)
@@ -104,6 +105,42 @@ Key points:
 - NPM handles public SSL certificates
 - Enable WebSocket support in NPM
 - Add custom Nginx headers for OIDC trust
+
+#### Advanced Nginx Configuration (for Non-Standard Ports)
+
+If you're using a **non-standard port** (e.g., `https://ondemand.example.com:58443`), add this to NPM's **Advanced → Custom Nginx Configuration**:
+
+```nginx
+location / {
+    # Set the REAL external port here (change 58443 to your port)
+    set $external_port 58443;
+
+    proxy_pass https://10.1.41.100:443;
+    
+    # Standard headers
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto https;
+    
+    # CRITICAL: Tell OOD the internet-facing port (prevents redirect to internal hostname)
+    proxy_set_header X-Forwarded-Port $external_port;
+    proxy_set_header X-Forwarded-Host $host:$external_port;
+
+    # Buffer sizes for OIDC tokens
+    proxy_buffer_size 128k;
+    proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
+
+    # WebSocket & Timeouts
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 3600s;
+}
+```
+
+**NOTE:** Replace `58443` with your actual external port. This configuration ensures OOD redirects back to the correct public URL instead of the internal hostname.
 
 ### 3.2 Squid Proxy Deployment
 
@@ -364,10 +401,12 @@ sudo vi /etc/ood/config/ood_portal.yml
 
 ### Final Working Configuration
 
+**IMPORTANT:** For public URLs with reverse proxies, use the **public hostname**, not the internal one.
+
 ```bash
 sudo tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
-# Use internal hostname, NOT the public NPM hostname
-servername: ${OOD_HOSTNAME}
+# Use PUBLIC hostname with port for OIDC redirects (NPM will handle internal routing)
+servername: ${PUBLIC_HOSTNAME}:${PUBLIC_PORT}
 
 # Use the self-signed certificate we created
 ssl:
@@ -389,7 +428,7 @@ oidc_remote_user_claim: email
 oidc_session_inactivity_timeout: 28800
 oidc_session_max_duration: 28800
 oidc_state_max_number_of_cookies: 10
-oidc_cookie_same_site: 'None'
+oidc_cookie_same_site: 'On'
 
 user_map_cmd: '/opt/ood/site/custom-user-mapping.sh'
 
@@ -407,7 +446,8 @@ Since NPM is the reverse proxy, add trust configuration for NPM-provided headers
 
 Edit `/etc/httpd/conf.d/ood-npm-trust.conf`:
 
-```apache
+```bash
+sudo tee /etc/httpd/conf.d/ood-npm-trust.conf > /dev/null <<EOF
 # Trust headers from NPM reverse proxy
 RemoteIPHeader X-Forwarded-For
 RemoteIPTrustedProxy ${NPM_IP}
@@ -415,6 +455,7 @@ RemoteIPInternalProxy ${NPM_IP}
 
 # Preserve original protocol from NPM
 SetEnvIf X-Forwarded-Proto https HTTPS=on
+EOF
 ```
 
 ---
