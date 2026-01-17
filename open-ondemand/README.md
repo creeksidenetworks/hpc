@@ -19,6 +19,7 @@
 # Domain names
 export DOMAIN_LOCAL="example.local"
 export DOMAIN_COM="example.com"
+export EMAIL_DOMAIN="example.com"
 
 # IP addresses
 export OOD_IP="10.1.41.100"
@@ -335,7 +336,7 @@ sudo tee /opt/ood/site/remote-user-mapping.sh > /dev/null <<EOF
 
 function urldecode() { : "\${*//+/ }"; echo -e "\${_//%/\\\\x}"; }
 
-REX="([^@]+)@${DOMAIN_COM}"
+REX="([^@]+)@${EMAIL_DOMAIN}"
 INPUT_USER=\$(urldecode \$1)
 
 if [[ \$INPUT_USER =~ \$REX ]]; then
@@ -363,7 +364,8 @@ sudo vi /etc/ood/config/ood_portal.yml
 
 ### Final Working Configuration
 
-```yaml
+```bash
+sudo tee /etc/ood/config/ood_portal.yml > /dev/null <<EOF
 # Use internal hostname, NOT the public NPM hostname
 servername: ${OOD_HOSTNAME}
 
@@ -393,6 +395,8 @@ user_map_cmd: '/opt/ood/site/custom-user-mapping.sh'
 
 user_env:
   REMOTE_USER
+
+EOF
 ```
 
 ---
