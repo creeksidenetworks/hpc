@@ -1,8 +1,8 @@
 # Open OnDemand Setup Notes: Rocky 8 + FreeIPA
 
-**Host:** `ood.usa.example.local`
+**Host:** `ood.example.local`
 
-**Access:** `https://ood.usa.example.local`
+**Access:** `https://ood.example.local`
 
 **Authentication:** PAM via SSSD (FreeIPA)
 
@@ -32,7 +32,7 @@ OOD runs HTTPS with a self-signed cert that NPM ignores:
 sudo openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
   -keyout /etc/pki/tls/private/ood.key \
   -out /etc/pki/tls/certs/ood.crt \
-  -subj "/CN=ood.usa.example.local"
+  -subj "/CN=ood.example.local"
 ```
 
 ```bash
@@ -48,7 +48,7 @@ sudo sudo nano /etc/ood/config/ood_portal.yml
 ```
 
 ```yaml
-servername: ood.usa.example.local
+servername: ood.example.local
 port: 443
 ssl:
   - SSLCertificateKeyFile /etc/pki/tls/private/ood.key
@@ -129,10 +129,6 @@ sudo systemctl restart httpd
 
 ### Troubleshooting Checklist
 
-* **Logs:** Check `/var/log/httpd/ood.usa.example.local_error.log`.
+* **Logs:** Check `/var/log/httpd/ood.example.local_error.log`.
 * **Config Test:** Run `apachectl configtest` to find syntax errors.
 * **PUN Issues:** If you log in but get an error, check `/var/log/ondemand-nginx/$USER/error.log`.
-
----
-
-Would you like me to help you configure the **Cluster Definition** files next so you can actually submit jobs to your scheduler through the dashboard?
