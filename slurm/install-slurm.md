@@ -86,6 +86,31 @@ This guide covers the installation and configuration of:
 
 ---
 
+## Configuration Variables
+
+Before starting the installation, set your environment variables. These will be used throughout the guide for easy copy/paste:
+
+```bash
+# Set your hostnames and update these to match your actual infrastructure
+export OOD_SERVER="ood-server.example.com"
+export WORKER1="worker1.example.com"
+export WORKER2="worker2.example.com"
+
+# Slurm service account UID (should match FreeIPA)
+export SLURM_UID="1668602000"
+export SLURM_GID="1668602000"
+
+# Worker node specifications (adjust based on your hardware)
+export WORKER1_CPUS="8"
+export WORKER1_MEMORY="16000"
+export WORKER2_CPUS="8"
+export WORKER2_MEMORY="16000"
+```
+
+Replace the example values with your actual hostnames and hardware specifications. Once set, you can use these variables in commands throughout the installation.
+
+---
+
 ## Step 1: Create FreeIPA Service Account
 
 ### 1.1 Create Slurm User in FreeIPA
@@ -100,8 +125,8 @@ kinit admin
 ipa user-add slurm \
   --first=Slurm \
   --last=Workload-Manager \
-  --uid=1668602000 \
-  --gidnumber=1668602000 \
+  --uid=$SLURM_UID \
+  --gidnumber=$SLURM_GID \
   --homedir=/var/lib/slurm \
   --shell=/sbin/nologin \
   --password
@@ -109,9 +134,9 @@ ipa user-add slurm \
 ipa user-disable slurm
 
 ipa hbacrule-add slurm_hosts
-ipa hbacrule-add-host slurm_hosts --hosts=ood-server.example.com
-ipa hbacrule-add-host slurm_hosts --hosts=worker1.example.com
-ipa hbacrule-add-host slurm_hosts --hosts=worker2.example.com
+ipa hbacrule-add-host slurm_hosts --hosts=$OOD_SERVER
+ipa hbacrule-add-host slurm_hosts --hosts=$WORKER1
+ipa hbacrule-add-host slurm_hosts --hosts=$WORKER2
 ipa hbacrule-add-user slurm_hosts --users=slurm
 ```
 
@@ -200,59 +225,80 @@ ls -la /var/log/ | grep slurm
 
 Munge provides authentication between Slurm components across nodes.
 
-### 3.1 Generate Munge Key (Controller Only)
+### 3.1 Configure SSH Keys for Passwordless Root Access
 
 On the **controller** (Open OnDemand server):
 
-Generate the munge key, set correct permissions for security, create a base64 encoded copy for easy distribution to other nodes, and display it for copying.
+Generate an ECDSA SSH key pair for the root user to enable passwordless access to worker nodes. This will simplify distribution of files like the munge key.
+
+```bash
+sudo ssh-keygen -t ecdsa -b 521 -f /root/.ssh/id_ecdsa -N ""
+```
+
+Copy the public key to each worker node's authorized_keys:
+
+```bash
+sudo ssh-copy-id -i /root/.ssh/id_ecdsa.pub -o StrictHostKeyChecking=no root@$WORKER1
+
+sudo ssh-copy-id -i /root/.ssh/id_ecdsa.pub -o StrictHostKeyChecking=no root@$WORKER2
+```
+
+Test passwordless SSH access:
+
+```bash
+sudo ssh -i /root/.ssh/id_ecdsa root@$WORKER1 "hostname"
+
+sudo ssh -i /root/.ssh/id_ecdsa root@$WORKER2 "hostname"
+```
+
+### 3.2 Generate Munge Key (Controller Only)
+
+On the **controller** (Open OnDemand server):
+
+Generate the munge key and set correct permissions for security.
 
 ```bash
 sudo /usr/sbin/create-munge-key -f
 
 sudo chown munge:munge /etc/munge/munge.key
 sudo chmod 400 /etc/munge/munge.key
-
-sudo cat /etc/munge/munge.key | base64 > /tmp/munge.key.b64
-
-cat /tmp/munge.key.b64
 ```
 
-### 3.2 Distribute Munge Key to Workers
+### 3.2 Generate Munge Key (Controller Only)
 
-**Option A: Using SCP**
+On the **controller** (Open OnDemand server):
 
-On the **controller**, copy the munge key to both worker nodes:
-
-```bash
-scp /tmp/munge.key.b64 worker1.example.com:/tmp/
-
-scp /tmp/munge.key.b64 worker2.example.com:/tmp/
-```
-
-**Option B: Manual Copy**
-
-Copy the content of `/tmp/munge.key.b64` and paste on each worker.
-
-### 3.3 Install Munge Key on Workers
-
-On **each worker**:
-
-Ensure the munge directory exists, decode and install the key, set proper permissions, clean up the temporary file, and verify the installation.
+Generate the munge key and set correct permissions for security.
 
 ```bash
-sudo mkdir -p /etc/munge
-
-sudo base64 -d /tmp/munge.key.b64 | sudo tee /etc/munge/munge.key > /dev/null
+sudo /usr/sbin/create-munge-key -f
 
 sudo chown munge:munge /etc/munge/munge.key
 sudo chmod 400 /etc/munge/munge.key
+```
 
-sudo rm /tmp/munge.key.b64
+### 3.3 Distribute Munge Key to Workers
+
+On the **controller**, use SCP with the SSH key to copy the munge key to both worker nodes:
+
+```bash
+sudo scp -i /root/.ssh/id_ecdsa /etc/munge/munge.key root@$WORKER1:/etc/munge/
+
+sudo scp -i /root/.ssh/id_ecdsa /etc/munge/munge.key root@$WORKER2:/etc/munge/
+```
+
+### 3.4 Set Permissions on Workers
+
+On **each worker**, set proper permissions on the munge key:
+
+```bash
+sudo chown munge:munge /etc/munge/munge.key
+sudo chmod 400 /etc/munge/munge.key
 
 sudo ls -la /etc/munge/munge.key
 ```
 
-### 3.4 Start Munge Service
+### 3.5 Start Munge Service
 
 On **all nodes**:
 
@@ -276,9 +322,9 @@ Create a test credential, copy it to a worker node, and verify it can be success
 ```bash
 munge -n > /tmp/munge.test
 
-scp /tmp/munge.test worker1.example.com:/tmp/
+sudo scp -i /root/.ssh/id_ecdsa /tmp/munge.test root@$WORKER1:/tmp/
 
-ssh worker1.example.com "unmunge < /tmp/munge.test"
+sudo ssh -i /root/.ssh/id_ecdsa root@$WORKER1 "unmunge < /tmp/munge.test"
 ```
 
 ---
@@ -306,14 +352,14 @@ Example output:
 On the **controller**, create `/etc/slurm/slurm.conf`:
 
 ```bash
-sudo tee /etc/slurm/slurm.conf > /dev/null <<'EOF'
+sudo tee /etc/slurm/slurm.conf > /dev/null <<EOF
 #
 # slurm.conf - Slurm configuration file
 #
 
 # CLUSTER CONFIGURATION
 ClusterName=hpc-cluster
-SlurmctldHost=ood-server.example.com
+SlurmctldHost=$OOD_SERVER
 
 # SLURM USER
 SlurmUser=slurm
@@ -369,12 +415,12 @@ JobAcctGatherFrequency=30
 
 # COMPUTE NODES
 # Update with your actual hostnames and hardware specs
-NodeName=worker1.example.com CPUs=8 RealMemory=16000 State=UNKNOWN
-NodeName=worker2.example.com CPUs=8 RealMemory=16000 State=UNKNOWN
+NodeName=$WORKER1 CPUs=$WORKER1_CPUS RealMemory=$WORKER1_MEMORY State=UNKNOWN
+NodeName=$WORKER2 CPUs=$WORKER2_CPUS RealMemory=$WORKER2_MEMORY State=UNKNOWN
 
 # PARTITIONS
-PartitionName=general Nodes=worker[1-2].example.com Default=YES MaxTime=INFINITE State=UP Priority=1
-PartitionName=debug Nodes=worker[1-2].example.com MaxTime=1:00:00 State=UP Priority=10
+PartitionName=general Nodes=$WORKER1,$WORKER2 Default=YES MaxTime=INFINITE State=UP Priority=1
+PartitionName=debug Nodes=$WORKER1,$WORKER2 MaxTime=1:00:00 State=UP Priority=10
 EOF
 ```
 
@@ -397,21 +443,12 @@ sudo chmod 644 /etc/slurm/slurm.conf
 
 **Option A: Using SCP**
 
-On the **controller**, copy the configuration file to both workers:
+On the **controller**, copy the configuration file to both workers using the SSH key:
 
 ```bash
-sudo scp /etc/slurm/slurm.conf worker1.example.com:/tmp/slurm.conf
+sudo scp -i /root/.ssh/id_ecdsa /etc/slurm/slurm.conf root@$WORKER1:/etc/slurm/
 
-sudo scp /etc/slurm/slurm.conf worker2.example.com:/tmp/slurm.conf
-```
-
-On **each worker**, move the configuration to the correct location and set proper ownership and permissions:
-
-```bash
-sudo mv /tmp/slurm.conf /etc/slurm/slurm.conf
-
-sudo chown slurm:slurm /etc/slurm/slurm.conf
-sudo chmod 644 /etc/slurm/slurm.conf
+sudo scp -i /root/.ssh/id_ecdsa /etc/slurm/slurm.conf root@$WORKER2:/etc/slurm/
 ```
 
 **Option B: Configuration Management**
@@ -512,29 +549,24 @@ sudo firewall-cmd --list-ports
 
 ### 6.2 Worker Firewall Rules
 
-On **each worker**:
+On **each worker**, open the port for the Slurmd compute daemon, reload the firewall, and verify:
 
 ```bash
-# Allow Slurmd (compute daemon)
 sudo firewall-cmd --permanent --add-port=6818/tcp
 
-# Reload firewall
 sudo firewall-cmd --reload
 
-# Verify
 sudo firewall-cmd --list-ports
 ```
 
 ### 6.3 SELinux Considerations
 
-If SELinux is enforcing (check with `getenforce`):
+If SELinux is enforcing (check with `getenforce`), configure port contexts for Slurm services. If semanage is not available, install the required package first:
 
 ```bash
-# Allow Slurm to use required ports
 sudo semanage port -a -t slurmd_port_t -p tcp 6818
 sudo semanage port -a -t slurmctld_port_t -p tcp 6817
 
-# If semanage not found, install:
 sudo dnf install -y policycoreutils-python-utils
 ```
 
@@ -559,76 +591,56 @@ sudo tail -f /var/log/slurm/slurmctld.log
 # Press Ctrl+C to exit tail
 ```
 
-**Troubleshooting**: If slurmctld fails to start, check:
+**Troubleshooting**: If slurmctld fails to start, check the journal for errors, verify the configuration, and check file permissions:
+
 ```bash
-# Check for errors
 sudo journalctl -xeu slurmctld
 
-# Verify configuration
 slurmd -C
 
-# Check file permissions
 ls -la /var/spool/slurm/ctld
 ls -la /var/log/slurm/
 ```
 
 ### 7.2 Start Worker Services
 
-On **each worker**:
+On **each worker**, enable and start the slurmd service, check its status, and view the logs:
 
 ```bash
-# Enable and start slurmd
 sudo systemctl enable slurmd
 sudo systemctl start slurmd
 
-# Check status
 sudo systemctl status slurmd
 
-# Check logs
 sudo tail -f /var/log/slurm/slurmd.log
-# Press Ctrl+C to exit tail
 ```
 
 ### 7.3 Verify Cluster Status
 
-On the **controller**:
+On the **controller**, check cluster status, node details, and node states. If nodes show as DOWN or DRAIN, resume them using the variables:
 
 ```bash
-# Check cluster information
 sinfo
 
-# Expected output:
-# PARTITION AVAIL  TIMELIMIT  NODES  STATE NODELIST
-# general*     up   infinite      2   idle worker[1-2]
-
-# Check node details
 scontrol show nodes
 
-# Check node state
 sinfo -Nel
 
-# If nodes show as DOWN or DRAIN, resume them:
-sudo scontrol update nodename=worker1.example.com state=resume
-sudo scontrol update nodename=worker2.example.com state=resume
+sudo scontrol update nodename=$WORKER1 state=resume
+sudo scontrol update nodename=$WORKER2 state=resume
 ```
 
 ### 7.4 Test Job Submission
 
-On the **controller** (as a regular user):
+On the **controller** (as a regular user), test job submission by running a simple hostname command, submitting a batch job, checking the queue, and reviewing job history:
 
 ```bash
-# Simple hostname test
 srun -N1 hostname
 
-# Expected output: worker1.example.com or worker2.example.com
-
-# Submit a batch job
 sbatch --wrap="sleep 30 && hostname"
 
-# Check queue
 squeue
 
-# Check job history
 sacct
 ```
 
@@ -640,35 +652,28 @@ For users to launch XFCE desktop sessions through Open OnDemand.
 
 ### 8.1 Install XFCE on Workers
 
-On **each worker**:
+On **each worker**, install the XFCE desktop environment, VNC server, desktop applications, and supporting utilities:
 
 ```bash
-# Install XFCE Desktop Environment
 sudo dnf groupinstall -y "Server with GUI"
 sudo dnf groupinstall -y "Xfce"
 
-# Install VNC and related tools
 sudo dnf install -y tigervnc-server turbovnc websockify
 
-# Install additional desktop applications
 sudo dnf install -y xfce4-terminal firefox chromium
 
-# Install fonts
 sudo dnf install -y dejavu-sans-fonts dejavu-serif-fonts liberation-fonts
 
-# Install X utilities
 sudo dnf install -y xorg-x11-apps xorg-x11-fonts-Type1 xorg-x11-fonts-misc
 ```
 
 ### 8.2 Configure VNC
 
-On **each worker**:
+On **each worker**, create the VNC directory structure and xstartup script template:
 
 ```bash
-# Create VNC directory template
 sudo mkdir -p /etc/skel/.vnc
 
-# Create xstartup template
 sudo tee /etc/skel/.vnc/xstartup > /dev/null <<'EOF'
 #!/bin/sh
 unset SESSION_MANAGER
@@ -681,16 +686,13 @@ sudo chmod +x /etc/skel/.vnc/xstartup
 
 ### 8.3 Install Additional Tools (Optional)
 
-On **each worker**:
+On **each worker**, install development tools, scientific computing packages, and text editors:
 
 ```bash
-# Install development tools
 sudo dnf groupinstall -y "Development Tools"
 
-# Install scientific computing tools
 sudo dnf install -y python3 python3-pip python3-numpy python3-scipy python3-matplotlib
 
-# Install text editors
 sudo dnf install -y gedit vim-enhanced emacs-nox
 ```
 
@@ -700,22 +702,20 @@ sudo dnf install -y gedit vim-enhanced emacs-nox
 
 ### 9.1 Create Cluster Configuration
 
-On the **Open OnDemand server**:
+On the **Open OnDemand server**, create the cluster configuration:
 
 ```bash
-# Create clusters directory
 sudo mkdir -p /etc/ood/config/clusters.d
 
-# Create cluster configuration
-sudo tee /etc/ood/config/clusters.d/hpc-cluster.yml > /dev/null <<'EOF'
+sudo tee /etc/ood/config/clusters.d/hpc-cluster.yml > /dev/null <<EOF
 ---
 v2:
   metadata:
     title: "HPC Cluster"
-    url: "https://ood-server.example.com"
+    url: "https://$OOD_SERVER"
     hidden: false
   login:
-    host: "ood-server.example.com"
+    host: "$OOD_SERVER"
   job:
     adapter: "slurm"
     cluster: "hpc-cluster"
@@ -742,11 +742,11 @@ sudo chmod 644 /etc/ood/config/clusters.d/hpc-cluster.yml
 
 ### 9.3 Verify Configuration
 
+Test the cluster configuration and check for errors:
+
 ```bash
-# Test cluster configuration
 sudo -u apache /opt/ood/ood-portal-generator/bin/generate -c /etc/ood/config/ood_portal.yml
 
-# Check for errors in configuration
 sudo cat /etc/ood/config/clusters.d/hpc-cluster.yml
 ```
 
@@ -890,34 +890,30 @@ sudo find /etc/ood/config/apps/bc_desktop -type d -exec chmod 755 {} \;
 On the **Open OnDemand server**:
 
 ```bash
-# Create shell app directory
 sudo mkdir -p /etc/ood/config/apps/shell
 
-# Configure environment
-sudo tee /etc/ood/config/apps/shell/env > /dev/null <<'EOF'
-# Disable origin check for shell app
+sudo tee /etc/ood/config/apps/shell/env > /dev/null <<EOF
 OOD_SHELL_ORIGIN_CHECK=off
 
-# Set default shell
-DEFAULT_SSHHOST=ood-server.example.com
+DEFAULT_SSHHOST=$OOD_SERVER
 EOF
 ```
 
 ### 11.2 Create Cluster-Specific Shell Access
 
 ```bash
-sudo tee /etc/ood/config/apps/shell/clusters.yml > /dev/null <<'EOF'
+sudo tee /etc/ood/config/apps/shell/clusters.yml > /dev/null <<EOF
 ---
 clusters:
   - id: "hpc-cluster"
     title: "HPC Cluster Login"
-    host: "ood-server.example.com"
+    host: "$OOD_SERVER"
   - id: "worker1"
     title: "Worker 1 Shell"
-    host: "worker1.example.com"
+    host: "$WORKER1"
   - id: "worker2"
     title: "Worker 2 Shell"
-    host: "worker2.example.com"
+    host: "$WORKER2"
 EOF
 ```
 
@@ -976,10 +972,8 @@ EOF
 
 sbatch test_job.sh
 
-# Check job status
 squeue
 
-# Check job output (after completion)
 cat test_*.out
 ```
 
@@ -1014,17 +1008,15 @@ cat test_*.out
 
 ### 12.4 Test User Permissions
 
+Verify that users can access their home directory in jobs and that user IDs are correctly resolved from FreeIPA:
+
 ```bash
-# Verify user can access home directory in jobs
 sbatch --wrap="ls -la $HOME"
 
-# Check job output
 cat slurm-*.out
 
-# Verify user ID consistency
 sbatch --wrap="id"
 cat slurm-*.out
-# Should show your FreeIPA UID (e.g., 1668600004)
 ```
 
 ---
@@ -1055,63 +1047,49 @@ sudo journalctl -xeu slurmd
 
 **Problem**: Jobs fail with "munge authentication error".
 
-**Solution**:
+**Solution**: Verify munge is running on all nodes, test munge functionality, check key permissions and consistency, and restart if needed:
+
 ```bash
-# On all nodes, verify munge is running
 sudo systemctl status munge
 
-# Test munge
 munge -n | unmunge
 
-# Check munge key permissions
 ls -la /etc/munge/munge.key
-# Should be: -r-------- 1 munge munge
 
-# Verify key is identical on all nodes
 md5sum /etc/munge/munge.key
 
-# Restart munge if needed
 sudo systemctl restart munge
 ```
 
-#### 3. Permission Denied Errors
-
 **Problem**: Slurm services fail with permission errors.
 
-**Solution**:
-```bash
-# Verify FreeIPA slurm user exists
-id slurm
-# Should show: uid=1668602000
+**Solution**: Verify the FreeIPA slurm user exists, fix directory ownership, and restart services:
 
-# Fix ownership of Slurm directories
+```bash
+id slurm
+
 sudo chown -R slurm:slurm /var/spool/slurm
 sudo chown -R slurm:slurm /var/log/slurm
 
-# Restart services
-sudo systemctl restart slurmctld  # on controller
-sudo systemctl restart slurmd     # on workers
+sudo systemctl restart slurmctld
+sudo systemctl restart slurmd
 ```
 
 #### 4. XFCE Desktop Won't Launch
 
 **Problem**: Desktop session fails to start or shows black screen.
 
-**Solution**:
+**Solution**: Check if XFCE is installed, verify VNC packages, check job output logs, and verify the xstartup script:
+
 ```bash
-# On worker node, check if XFCE is installed
 rpm -qa | grep xfce
 
-# Install if missing
 sudo dnf groupinstall -y "Xfce"
 
-# Check VNC packages
 rpm -qa | grep vnc
 
-# Check job output logs
 cat ~/ondemand/data/sys/dashboard/batch_connect/sys/bc_desktop/output/*/output.log
 
-# Verify xstartup
 cat ~/.vnc/xstartup
 ```
 
@@ -1119,18 +1097,15 @@ cat ~/.vnc/xstartup
 
 **Problem**: Regular users receive "Access denied" when submitting jobs.
 
-**Solution**:
+**Solution**: Verify the user exists in FreeIPA, check user access to Slurm, verify configuration allows the user, and check partition access:
+
 ```bash
-# Verify user exists in FreeIPA
 id <username>
 
-# Check user can access Slurm
 squeue -u <username>
 
-# Verify Slurm configuration allows user
 grep -i "AllowUsers\|DenyUsers" /etc/slurm/slurm.conf
 
-# Check partition access
 scontrol show partition general
 ```
 
@@ -1138,39 +1113,33 @@ scontrol show partition general
 
 **Problem**: OOD shows "Unable to connect to Slurm".
 
-**Solution**:
+**Solution**: Verify cluster configuration, test Slurm access as the Apache user, check permissions, and restart OOD:
+
 ```bash
-# Verify cluster configuration
 cat /etc/ood/config/clusters.d/hpc-cluster.yml
 
-# Test as Apache user
 sudo -u apache /usr/bin/sinfo
 
-# Check Apache can read slurm.conf
 sudo -u apache cat /etc/slurm/slurm.conf
 
-# Restart OOD
 sudo systemctl restart httpd24-httpd
 sudo /opt/ood/nginx_stage/sbin/nginx_stage nginx_clean
 ```
 
 #### 7. SELinux Blocking Slurm
 
-**Problem**: SELinux denials in audit log.
+**Problem**: SELinux blocking Slurm operations.
 
-**Solution**:
+**Solution**: Check for SELinux denials, temporarily set to permissive mode for testing, create a policy if needed, and re-enable enforcing:
+
 ```bash
-# Check for denials
 sudo ausearch -m avc -ts recent | grep slurm
 
-# Temporarily set to permissive for testing
 sudo setenforce 0
 
-# If Slurm works in permissive mode, create policy
 sudo ausearch -m avc -ts recent | audit2allow -M slurm_policy
 sudo semodule -i slurm_policy.pp
 
-# Re-enable enforcing
 sudo setenforce 1
 ```
 
@@ -1185,25 +1154,22 @@ sudo setenforce 1
 
 ### Useful Commands
 
+Common Slurm commands for cluster information, job management, node management, and accounting:
+
 ```bash
-# Slurm cluster info
 sinfo -Nel
 scontrol show config
 scontrol show nodes
 
-# Job management
 squeue -u $USER
 scancel <job_id>
 scontrol show job <job_id>
 
-# Node management
 sudo scontrol update nodename=<node> state=resume
 sudo scontrol update nodename=<node> state=drain reason="maintenance"
 
-# Reload Slurm configuration (without restart)
 sudo scontrol reconfigure
 
-# View accounting information
 sacct -u $USER
 sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed
 ```
@@ -1213,8 +1179,6 @@ sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed
 ## Appendix
 
 ### A. Upgrading to Keycloak/FreeIPA Authentication
-
-Since you mentioned plans to upgrade to Keycloak:
 
 #### Keycloak + FreeIPA Integration
 
@@ -1249,20 +1213,16 @@ sudo systemctl restart httpd24-httpd
 
 ### B. Slurm Accounting Database (Optional)
 
-For job tracking and resource usage accounting:
+For job tracking and resource usage accounting, install and configure MariaDB, create the Slurm database, and install the slurmdbd service:
 
 ```bash
-# Install MariaDB
 sudo dnf install -y mariadb-server
 
-# Start and enable
 sudo systemctl enable mariadb
 sudo systemctl start mariadb
 
-# Secure installation
 sudo mysql_secure_installation
 
-# Create Slurm database
 sudo mysql -u root -p << 'EOF'
 CREATE DATABASE slurm_acct_db;
 CREATE USER 'slurm'@'localhost' IDENTIFIED BY 'password';
@@ -1270,13 +1230,8 @@ GRANT ALL PRIVILEGES ON slurm_acct_db.* TO 'slurm'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-# Install slurmdbd
 sudo dnf install -y slurm-slurmdbd
 
-# Configure /etc/slurm/slurmdbd.conf
-# (detailed configuration omitted for brevity)
-
-# Start slurmdbd
 sudo systemctl enable slurmdbd
 sudo systemctl start slurmdbd
 ```
@@ -1287,34 +1242,29 @@ For shared home directories (recommended):
 
 **Option 1: NFS**
 
-On NFS server:
+On the NFS server, install NFS utilities, create the export directory, configure exports, and start the service:
+
 ```bash
-# Install NFS
 sudo dnf install -y nfs-utils
 
-# Create export
 sudo mkdir -p /export/home
 sudo chown -R root:root /export/home
 
-# Configure /etc/exports
 echo "/export/home *(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports
 
-# Start NFS
 sudo systemctl enable nfs-server
 sudo systemctl start nfs-server
 sudo exportfs -a
 ```
 
-On all compute nodes:
+On all compute nodes, install the NFS client, mount the home directories, and add to fstab for persistence:
+
 ```bash
-# Install NFS client
 sudo dnf install -y nfs-utils
 
-# Mount home directories
 sudo mkdir -p /home
 sudo mount nfs-server.example.com:/export/home /home
 
-# Add to /etc/fstab for persistence
 echo "nfs-server.example.com:/export/home /home nfs defaults 0 0" | sudo tee -a /etc/fstab
 ```
 
@@ -1327,12 +1277,10 @@ Use FreeIPA's automount feature for centralized home directory management.
 Add to `/etc/slurm/slurm.conf`:
 
 ```bash
-# Accounting
 AccountingStorageType=accounting_storage/slurmdbd
 AccountingStorageHost=localhost
 AccountingStorageTRES=gres/gpu,mem,cpu
 
-# Priority
 PriorityType=priority/multifactor
 PriorityDecayHalfLife=7-0
 PriorityMaxAge=14-0
