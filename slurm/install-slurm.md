@@ -578,17 +578,19 @@ sudo dnf install -y policycoreutils-python-utils
 
 On the **controller**:
 
+**Enable and start slurmctld**
 ```bash
-# Enable and start slurmctld
 sudo systemctl enable slurmctld
 sudo systemctl start slurmctld
+```
 
-# Check status
+```bash
 sudo systemctl status slurmctld
+```
 
-# Check logs
+**Check logs**
+```bash
 sudo tail -f /var/log/slurm/slurmctld.log
-# Press Ctrl+C to exit tail
 ```
 
 **Troubleshooting**: If slurmctld fails to start, check the journal for errors, verify the configuration, and check file permissions:
@@ -1179,6 +1181,7 @@ sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed
 ## Appendix
 
 ### A. Upgrading to Keycloak/FreeIPA Authentication
+
 
 #### Keycloak + FreeIPA Integration
 
