@@ -932,32 +932,22 @@ sudo chmod 644 /etc/ood/config/apps/shell/*
 
 ### 12.1 Restart Open OnDemand Services
 
-On the **Open OnDemand server**:
+On the **Open OnDemand server**, restart Apache and check status:
 
 ```bash
-# Restart Apache
 sudo systemctl restart httpd24-httpd
-
-# Or restart NGINX for per-user NGINX instances
 sudo /opt/ood/nginx_stage/sbin/nginx_stage nginx_clean
 sudo systemctl restart httpd24-httpd
-
-# Check status
 sudo systemctl status httpd24-httpd
 ```
 
 ### 12.2 Test Slurm Functionality
 
-As a **regular user** (not root):
+As a **regular user** (not root), verify cluster status, run a test job, and check the output:
 
 ```bash
-# Check cluster status
 sinfo
-
-# Run simple test
 srun -N1 hostname
-
-# Submit batch job
 cat > test_job.sh << 'EOF'
 #!/bin/bash
 #SBATCH --job-name=test
@@ -973,9 +963,7 @@ echo "Job completed successfully!"
 EOF
 
 sbatch test_job.sh
-
 squeue
-
 cat test_*.out
 ```
 
@@ -1014,9 +1002,7 @@ Verify that users can access their home directory in jobs and that user IDs are 
 
 ```bash
 sbatch --wrap="ls -la $HOME"
-
 cat slurm-*.out
-
 sbatch --wrap="id"
 cat slurm-*.out
 ```
@@ -1031,16 +1017,12 @@ cat slurm-*.out
 
 **Problem**: `sinfo` shows nodes in DOWN or DRAIN state.
 
-**Solution**:
-```bash
-# Check node status
-scontrol show node worker1.example.com
+**Solution**: Check node status, resume nodes, and verify slurmd service if nodes remain down:
 
-# Resume nodes
+```bash
+scontrol show node worker1.example.com
 sudo scontrol update nodename=worker1.example.com state=resume
 sudo scontrol update nodename=worker2.example.com state=resume
-
-# If nodes still DOWN, check slurmd on worker:
 sudo systemctl status slurmd
 sudo journalctl -xeu slurmd
 ```
@@ -1053,13 +1035,9 @@ sudo journalctl -xeu slurmd
 
 ```bash
 sudo systemctl status munge
-
 munge -n | unmunge
-
 ls -la /etc/munge/munge.key
-
 md5sum /etc/munge/munge.key
-
 sudo systemctl restart munge
 ```
 
@@ -1069,10 +1047,8 @@ sudo systemctl restart munge
 
 ```bash
 id slurm
-
 sudo chown -R slurm:slurm /var/spool/slurm
 sudo chown -R slurm:slurm /var/log/slurm
-
 sudo systemctl restart slurmctld
 sudo systemctl restart slurmd
 ```
@@ -1085,13 +1061,9 @@ sudo systemctl restart slurmd
 
 ```bash
 rpm -qa | grep xfce
-
 sudo dnf groupinstall -y "Xfce"
-
 rpm -qa | grep vnc
-
 cat ~/ondemand/data/sys/dashboard/batch_connect/sys/bc_desktop/output/*/output.log
-
 cat ~/.vnc/xstartup
 ```
 
@@ -1103,11 +1075,8 @@ cat ~/.vnc/xstartup
 
 ```bash
 id <username>
-
 squeue -u <username>
-
 grep -i "AllowUsers\|DenyUsers" /etc/slurm/slurm.conf
-
 scontrol show partition general
 ```
 
@@ -1119,11 +1088,8 @@ scontrol show partition general
 
 ```bash
 cat /etc/ood/config/clusters.d/hpc-cluster.yml
-
 sudo -u apache /usr/bin/sinfo
-
 sudo -u apache cat /etc/slurm/slurm.conf
-
 sudo systemctl restart httpd24-httpd
 sudo /opt/ood/nginx_stage/sbin/nginx_stage nginx_clean
 ```
@@ -1136,12 +1102,9 @@ sudo /opt/ood/nginx_stage/sbin/nginx_stage nginx_clean
 
 ```bash
 sudo ausearch -m avc -ts recent | grep slurm
-
 sudo setenforce 0
-
 sudo ausearch -m avc -ts recent | audit2allow -M slurm_policy
 sudo semodule -i slurm_policy.pp
-
 sudo setenforce 1
 ```
 
@@ -1162,16 +1125,12 @@ Common Slurm commands for cluster information, job management, node management, 
 sinfo -Nel
 scontrol show config
 scontrol show nodes
-
 squeue -u $USER
 scancel <job_id>
 scontrol show job <job_id>
-
 sudo scontrol update nodename=<node> state=resume
 sudo scontrol update nodename=<node> state=drain reason="maintenance"
-
 sudo scontrol reconfigure
-
 sacct -u $USER
 sacct -j <job_id> --format=JobID,JobName,Partition,State,Elapsed
 ```
@@ -1220,21 +1179,16 @@ For job tracking and resource usage accounting, install and configure MariaDB, c
 
 ```bash
 sudo dnf install -y mariadb-server
-
 sudo systemctl enable mariadb
 sudo systemctl start mariadb
-
 sudo mysql_secure_installation
-
 sudo mysql -u root -p << 'EOF'
 CREATE DATABASE slurm_acct_db;
 CREATE USER 'slurm'@'localhost' IDENTIFIED BY 'password';
 GRANT ALL PRIVILEGES ON slurm_acct_db.* TO 'slurm'@'localhost';
 FLUSH PRIVILEGES;
 EOF
-
 sudo dnf install -y slurm-slurmdbd
-
 sudo systemctl enable slurmdbd
 sudo systemctl start slurmdbd
 ```
@@ -1249,12 +1203,9 @@ On the NFS server, install NFS utilities, create the export directory, configure
 
 ```bash
 sudo dnf install -y nfs-utils
-
 sudo mkdir -p /export/home
 sudo chown -R root:root /export/home
-
 echo "/export/home *(rw,sync,no_root_squash,no_subtree_check)" | sudo tee -a /etc/exports
-
 sudo systemctl enable nfs-server
 sudo systemctl start nfs-server
 sudo exportfs -a
@@ -1264,10 +1215,8 @@ On all compute nodes, install the NFS client, mount the home directories, and ad
 
 ```bash
 sudo dnf install -y nfs-utils
-
 sudo mkdir -p /home
 sudo mount nfs-server.example.com:/export/home /home
-
 echo "nfs-server.example.com:/export/home /home nfs defaults 0 0" | sudo tee -a /etc/fstab
 ```
 
@@ -1295,13 +1244,10 @@ PriorityWeightPartition=1000
 
 ### E. GPU Support (If Available)
 
-If your workers have GPUs:
+If your workers have GPUs, add GPU configuration to slurm.conf and create gres.conf:
 
 ```bash
-# In slurm.conf, add to NodeName:
 NodeName=worker1 CPUs=8 RealMemory=16000 Gres=gpu:2 State=UNKNOWN
-
-# Create gres.conf
 sudo tee /etc/slurm/gres.conf > /dev/null <<'EOF'
 NodeName=worker1 Name=gpu File=/dev/nvidia0
 NodeName=worker1 Name=gpu File=/dev/nvidia1
@@ -1339,7 +1285,6 @@ sudo systemctl start prometheus-slurm-exporter
 #!/bin/bash
 BACKUP_DIR="/backup/slurm/$(date +%Y%m%d)"
 mkdir -p $BACKUP_DIR
-
 cp -r /etc/slurm $BACKUP_DIR/
 cp /etc/munge/munge.key $BACKUP_DIR/
 cp -r /etc/ood/config $BACKUP_DIR/
