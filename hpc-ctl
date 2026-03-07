@@ -39,6 +39,7 @@ Usage: $0 <command> [options]
 
 Commands:
   install [-c <conf_dir>]       Install Open OnDemand HPC server
+  status                        Show status of services, nodes, jobs, and apps
   cpn -add    <hostname|ip>     Add a compute node to the cluster
   cpn -remove <hostname|ip>     Remove a compute node from the cluster
   update                        Sync cluster nodes from conf/cluster.conf
@@ -135,8 +136,8 @@ OIDC_CLIENT_SECRET=YOUR-CLIENT-SECRET
 
 # JWT claim mapped to POSIX username.
 # Append regex to extract a sub-match (e.g. strip domain from UPNs).
-OIDC_REMOTE_USER_CLAIM=preferred_username ^([^@]+)
-OIDC_SCOPE=openid profile email
+OIDC_REMOTE_USER_CLAIM="preferred_username ^([^@]+)"
+OIDC_SCOPE="openid profile email"
 
 # MariaDB password for Slurm accounting DB (auto-generated if left blank)
 MARIADB_SLURM_PASS=
@@ -175,13 +176,14 @@ check_root() {
 
 check_ipa_joined() {
     log_step "Checking FreeIPA membership..."
-    if ! ipa whoami &>/dev/null; then
+    # Use realm list (no Kerberos ticket required) to verify domain enrollment.
+    if ! realm list 2>/dev/null | grep -qi "domain-name:.*${IPA_DOMAIN}"; then
         log_warn "This server is not joined to FreeIPA."
         log_warn "Join with: ipa-client-install --server=${IPA_SERVER} --domain=${IPA_DOMAIN}"
         log_warn "Then re-run this script."
         exit 1
     fi
-    log_info "FreeIPA membership confirmed."
+    log_info "FreeIPA membership confirmed (domain: ${IPA_DOMAIN})."
 }
 
 #-------------------------------------------------------------------------------
@@ -264,7 +266,7 @@ install_repos() {
     cat > /etc/yum.repos.d/mariadb.repo <<EOF
 [mariadb]
 name = MariaDB ${MARIADB_VERSION}
-baseurl = https://downloads.mariadb.com/MariaDB/mariadb-${MARIADB_VERSION}/yum/rhel8-amd64
+baseurl = https://downloads.mariadb.com/MariaDB/mariadb-${MARIADB_VERSION}/yum/rhel/8/x86_64
 gpgkey = https://downloads.mariadb.com/MariaDB/RPM-GPG-KEY-MariaDB
 gpgcheck = 1
 enabled = 1
@@ -312,11 +314,14 @@ install_packages() {
         cronie \
         xauth xterm \
         mod_auth_openidc \
-        lua mod_lua
+        lua
 
-    # EDA / GUI applications
+    # EDA / GUI applications and interactive app dependencies
     dnf install -y gtkwave || log_warn "gtkwave not found in repos; install manually."
     dnf install -y google-chrome-stable || log_warn "google-chrome install failed; check repo."
+    dnf install -y libreoffice || log_warn "libreoffice install failed; check repo."
+    dnf install -y code || log_warn "VS Code install failed; check vscode repo."
+    dnf install -y firefox gnome-terminal xfce4-terminal || log_warn "terminal apps install failed."
 
     # Xpra HTML5
     dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
@@ -325,6 +330,25 @@ install_packages() {
     dnf install -y ondemand
 
     log_info "Package installation complete."
+}
+
+#-------------------------------------------------------------------------------
+# install_code_server: install code-server binary via standalone installer
+#-------------------------------------------------------------------------------
+install_code_server() {
+    log_step "Installing code-server..."
+
+    if [[ -x /opt/code-server/bin/code-server ]]; then
+        log_info "code-server already installed: $(/opt/code-server/bin/code-server --version 2>/dev/null | head -1)"
+        return 0
+    fi
+
+    if curl -fsSL https://code-server.dev/install.sh | \
+            sh -s -- --prefix=/opt/code-server --method=standalone &>>"$LOG_FILE"; then
+        log_info "code-server installed: $(/opt/code-server/bin/code-server --version 2>/dev/null | head -1)"
+    else
+        log_warn "code-server install failed (check $LOG_FILE)"
+    fi
 }
 
 #-------------------------------------------------------------------------------
@@ -773,6 +797,18 @@ EOF
     /opt/ood/ood-portal-generator/sbin/update_ood_portal 2>/dev/null || \
         log_warn "update_ood_portal failed; httpd config may need manual refresh."
 
+    # Serve xpra HTML5 static files directly from Apache to avoid 502 errors.
+    # Xpra's embedded HTTP server can't handle 30+ parallel browser requests;
+    # only the WebSocket upgrade goes through /rnode/ to xpra.
+    cat > /etc/httpd/conf.d/xpra-proxy-fix.conf <<'EOF'
+Alias /xpra-html5 /usr/share/xpra/www
+<Directory /usr/share/xpra/www>
+    Options None
+    AllowOverride None
+    Require all granted
+</Directory>
+EOF
+
     log_info "Open OnDemand configured."
 }
 
@@ -860,25 +896,25 @@ EOF
         cat > "$desktop_dir/form.yml" <<EOF
 ---
 cluster: "${cluster_lc}"
-form:
-  - bc_num_hours
-  - bc_num_slots
-  - bc_nodelist
-  - bc_email_on_started
 attributes:
-  desktop: "xfce"
   bc_nodelist:
     widget: select
     label: "Compute Node"
     options:
       - ["Any Node (Slurm selects automatically)", ""]
     help: "Select a specific compute node, or let Slurm assign one automatically."
+
+form:
+  - bc_num_hours
+  - bc_num_slots
+  - bc_nodelist
+  - bc_email_on_started
 EOF
 
         cat > "$desktop_dir/submit.yml.erb" <<'EOF'
 ---
 batch_connect:
-  template: xpra
+  template: basic
 <% unless bc_nodelist.blank? %>
 script:
   native:
@@ -886,25 +922,58 @@ script:
 <% end %>
 EOF
 
+        cat > "$desktop_dir/template/before.sh.erb" <<'EOF'
+# Find available port for Xpra WebSocket server
+port=$(find_port)
+
+export _xpra_tmp="/var/tmp/xpra-${USER}-${port}"
+mkdir -p "${_xpra_tmp}"
+export XAUTHORITY="${_xpra_tmp}/.Xauthority"
+export XDG_RUNTIME_DIR="${_xpra_tmp}"
+EOF
+
         cat > "$desktop_dir/template/script.sh.erb" <<'EOF'
-#!/bin/bash
-# Launch Xfce desktop via Xpra HTML5
+#!/usr/bin/env bash
 
-export DISPLAY="${DISPLAY:-:0}"
+echo "TIMING - Starting Xfce desktop via Xpra at: $(date)"
+cd "${HOME}"
+set -x
 
-xpra start \
-  --start=startxfce4 \
-  --html=on \
-  --bind-tcp=0.0.0.0:<%= port %> \
-  --no-daemon \
-  --exit-with-children \
-  --start-after-connect=true \
-  --sharing=no \
-  --audio=no \
-  --notifications=no \
-  --bell=no
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
-wait
+xpra start-desktop \
+    --bind-ws=0.0.0.0:${port} \
+    --html=on \
+    --ws-auth=none \
+    --start=startxfce4 \
+    --daemon=no \
+    --socket-dir="${_xpra_tmp}" \
+    --pulseaudio=no \
+    --notifications=no \
+    --webcam=no \
+    --bell=no \
+    --resize-display=yes \
+    --dpi=96
+
+echo "TIMING - Desktop exited at: $(date)"
+EOF
+
+        cat > "$desktop_dir/template/after.sh" <<'EOF'
+echo "Waiting for Xpra to open port ${port}..."
+if wait_until_port_used "${host}:${port}" 60; then
+    echo "Discovered Xpra listening on port ${port}!"
+else
+    echo "Timed out waiting for Xpra to open port ${port}!"
+    pkill -P ${SCRIPT_PID}
+    clean_up 1
+fi
+sleep 5
+EOF
+
+        cat > "$desktop_dir/view.html.erb" <<'EOF'
+<a href="/xpra-html5/?path=/rnode/<%= host %>/<%= port %>/&autohide=1" target="_blank" class="btn btn-primary">
+  <i class="fa fa-desktop"></i> Connect to Desktop
+</a>
 EOF
         log_info "OOD Desktop (Xfce/Xpra) app created."
     else
@@ -1036,6 +1105,8 @@ trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 <% if context.app_name == 'google-chrome' %>
 export _app_cmd="google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --user-data-dir=/tmp/chrome-\${USER}-\${SLURM_JOB_ID}"
+<% elsif context.app_name == 'code' %>
+export _app_cmd="code --no-sandbox --unity-launch"
 <% else %>
 export _app_cmd="<%= context.app_name %>"
 <% end %>
@@ -1072,12 +1143,272 @@ sleep 5
 EOF
 
     cat > "${unified_dir}/view.html.erb" <<'EOF'
-<a href="/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
+<a href="/xpra-html5/?path=/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
   <i class="fa fa-desktop"></i> Connect to Application
 </a>
 EOF
 
     log_info "Unified Applications launcher created."
+}
+
+#-------------------------------------------------------------------------------
+# setup_terminal: create OOD app_terminal (xpra-based terminal with DLP)
+#-------------------------------------------------------------------------------
+setup_terminal() {
+    log_step "Configuring Terminal app (xpra + DLP)..."
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+    local dir="/var/www/ood/apps/sys/app_terminal"
+    mkdir -p "${dir}/template"
+
+    cat > "${dir}/manifest.yml" <<'EOF'
+---
+name: Terminal
+category: Interactive Apps
+subcategory: Terminal
+role: batch_connect
+description: Launch a terminal on a compute node via Xpra HTML5.
+EOF
+
+    cat > "${dir}/form.yml" <<EOF
+---
+cluster: "${cluster_lc}"
+form:
+  - terminal_emulator
+  - bc_num_hours
+  - bc_num_slots
+  - bc_nodelist
+attributes:
+  terminal_emulator:
+    widget: select
+    label: "Terminal Emulator"
+    options:
+      - ["xfce4-terminal", "xfce4-terminal"]
+      - ["gnome-terminal", "gnome-terminal"]
+      - ["xterm", "xterm"]
+    help: "Select your preferred terminal emulator."
+  bc_num_hours:
+    value: 2
+  bc_num_slots:
+    value: 1
+    max: 4
+  bc_nodelist:
+    widget: select
+    label: "Compute Node"
+    options:
+      - ["Any Node (Slurm selects automatically)", ""]
+    help: "Select a specific compute node, or let Slurm assign one automatically."
+EOF
+
+    cat > "${dir}/submit.yml.erb" <<'EOF'
+---
+batch_connect:
+  template: basic
+<% unless bc_nodelist.blank? %>
+script:
+  native:
+    - "--nodelist=<%= bc_nodelist %>"
+<% end %>
+EOF
+
+    cat > "${dir}/template/before.sh.erb" <<'EOF'
+# Find available port for Xpra WebSocket server
+port=$(find_port)
+
+export _xpra_tmp="/var/tmp/xpra-${USER}-${port}"
+mkdir -p "${_xpra_tmp}"
+export XAUTHORITY="${_xpra_tmp}/.Xauthority"
+export XDG_RUNTIME_DIR="${_xpra_tmp}"
+
+# Update session card title
+_ood_db=$(find "${HOME}/ondemand/data" -name "<%= session.id %>" -path "*/batch_connect/db/*" 2>/dev/null | head -1)
+_app_title="Terminal - <%= context.terminal_emulator %>"
+if [[ -n "${_ood_db}" && -f "${_ood_db}" ]]; then
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+d['title'] = sys.argv[2]
+with open(sys.argv[1], 'w') as f: json.dump(d, f)
+" "${_ood_db}" "${_app_title}" 2>/dev/null || true
+fi
+EOF
+
+    cat > "${dir}/template/script.sh.erb" <<'EOF'
+#!/usr/bin/env bash
+
+echo "TIMING - Starting <%= context.terminal_emulator %> via Xpra at: $(date)"
+cd "${HOME}"
+set -x
+
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+
+# DLP: determine clipboard and file-transfer permissions from group membership
+id -Gn | grep -qw "dlp_allow_clipboard" && _clip=yes || _clip=no
+id -Gn | grep -qw "dlp_allow_download"  && _xfer=yes || _xfer=no
+
+<% if context.terminal_emulator == 'gnome-terminal' %>
+export _term_cmd="dbus-launch gnome-terminal --wait"
+<% else %>
+export _term_cmd="<%= context.terminal_emulator %>"
+<% end %>
+
+xpra start \
+    --bind-ws=0.0.0.0:${port} \
+    --html=on \
+    --ws-auth=none \
+    --start-child="${_term_cmd}" \
+    --exit-with-children=yes \
+    --daemon=no \
+    --socket-dir="${_xpra_tmp}" \
+    --pulseaudio=no \
+    --notifications=no \
+    --webcam=no \
+    --clipboard=${_clip} \
+    --file-transfer=${_xfer} \
+    --resize-display=1920x1080 \
+    --dpi=96 \
+    --desktop-scaling=off
+
+echo "TIMING - Terminal exited at: $(date)"
+EOF
+
+    cat > "${dir}/template/after.sh" <<'EOF'
+echo "Waiting for Xpra to open port ${port}..."
+if wait_until_port_used "${host}:${port}" 60; then
+    echo "Discovered Xpra listening on port ${port}!"
+else
+    echo "Timed out waiting for Xpra to open port ${port}!"
+    pkill -P ${SCRIPT_PID}
+    clean_up 1
+fi
+sleep 5
+EOF
+
+    cat > "${dir}/view.html.erb" <<'EOF'
+<a href="/xpra-html5/?path=/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
+  <i class="fa fa-terminal"></i> Connect to Terminal
+</a>
+EOF
+
+    log_info "Terminal app created."
+}
+
+#-------------------------------------------------------------------------------
+# setup_codeserver: create OOD app_codeserver (web-based VS Code, group-gated)
+#-------------------------------------------------------------------------------
+setup_codeserver() {
+    log_step "Configuring VS Code (code-server) app..."
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+    local dir="/var/www/ood/apps/sys/app_codeserver"
+    mkdir -p "${dir}/template"
+
+    cat > "${dir}/manifest.yml" <<'EOF'
+---
+name: VS Code
+category: Interactive Apps
+subcategory: Development
+role: batch_connect
+description: >
+  Launch Visual Studio Code (code-server) in the browser on a compute node.
+  Requires membership in the app_codeserver group.
+EOF
+
+    cat > "${dir}/form.yml" <<EOF
+---
+cluster: "${cluster_lc}"
+form:
+  - bc_num_hours
+  - bc_num_slots
+  - bc_nodelist
+attributes:
+  bc_num_hours:
+    value: 4
+  bc_num_slots:
+    value: 2
+    max: 8
+  bc_nodelist:
+    widget: select
+    label: "Compute Node"
+    options:
+      - ["Any Node (Slurm selects automatically)", ""]
+    help: "Select a specific compute node, or let Slurm assign one automatically."
+EOF
+
+    cat > "${dir}/submit.yml.erb" <<'EOF'
+---
+batch_connect:
+  template: basic
+<% unless bc_nodelist.blank? %>
+script:
+  native:
+    - "--nodelist=<%= bc_nodelist %>"
+<% end %>
+EOF
+
+    cat > "${dir}/template/before.sh.erb" <<'EOF'
+# Group access check — requires app_codeserver group membership
+if ! id -Gn | grep -qw "app_codeserver"; then
+  echo "============================================================"
+  echo "ACCESS DENIED: You must be a member of the 'app_codeserver'"
+  echo "group to use the VS Code (code-server) app."
+  echo "Contact your HPC administrator to request access."
+  echo "============================================================"
+  exit 1
+fi
+
+# Find available port for code-server
+port=$(find_port)
+
+export _cs_local="/var/tmp/code-server-${USER}-${port}"
+mkdir -p "${_cs_local}/user-data" "${_cs_local}/extensions"
+
+# Write code-server config
+mkdir -p "${HOME}/.config/code-server"
+cat > "${HOME}/.config/code-server/config.yaml" <<EOL
+bind-addr: 0.0.0.0:${port}
+auth: none
+disable-telemetry: true
+EOL
+EOF
+
+    cat > "${dir}/template/script.sh.erb" <<'EOF'
+#!/usr/bin/env bash
+
+echo "TIMING - Starting code-server at: $(date)"
+cd "${HOME}"
+set -x
+
+trap 'rm -rf "${_cs_local}"' EXIT
+
+/opt/code-server/bin/code-server \
+    --config "${HOME}/.config/code-server/config.yaml" \
+    --user-data-dir "${_cs_local}/user-data" \
+    --extensions-dir "${_cs_local}/extensions" \
+    "${HOME}"
+
+echo "TIMING - code-server exited at: $(date)"
+EOF
+
+    cat > "${dir}/template/after.sh" <<'EOF'
+echo "Waiting for code-server to open port ${port}..."
+echo "TIMING - Starting wait at: $(date)"
+if wait_until_port_used "${host}:${port}" 60; then
+    echo "Discovered code-server listening on port ${port}!"
+    echo "TIMING - Wait ended at: $(date)"
+else
+    echo "Timed out waiting for code-server to open port ${port}!"
+    pkill -P ${SCRIPT_PID}
+    clean_up 1
+fi
+sleep 2
+EOF
+
+    cat > "${dir}/view.html.erb" <<'EOF'
+<a href="/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
+  <i class="fa fa-code"></i> Connect to VS Code
+</a>
+EOF
+
+    log_info "VS Code (code-server) app created."
 }
 
 #-------------------------------------------------------------------------------
@@ -1291,6 +1622,7 @@ cmd_install() {
     setup_slurm_user
     install_repos
     install_packages
+    install_code_server
     install_slurm
     setup_slurm_dirs
     setup_munge
@@ -1302,6 +1634,8 @@ cmd_install() {
     setup_sssd
     setup_xpra
     setup_interactive_apps
+    setup_terminal
+    setup_codeserver
     setup_ipa_sync_timer
 
     # Register this server as the initial compute node
@@ -1408,6 +1742,91 @@ cmd_update() {
     log_info "Cluster update complete."
 }
 
+#-------------------------------------------------------------------------------
+# cmd_status: show health of all HPC services, Slurm nodes, and OOD apps
+#-------------------------------------------------------------------------------
+cmd_status() {
+    local ok="${GREEN}✓${NC}"
+    local fail="${RED}✗${NC}"
+    local warn="${YELLOW}!${NC}"
+    local bold='\033[1m'
+
+    echo ""
+    echo -e "${bold}=== HPC System Status ===${NC}"
+    echo ""
+
+    # --- Services ---
+    echo -e "${bold}Services:${NC}"
+    local services=(mariadb munge slurmdbd slurmctld slurmd httpd crond sshd)
+    for svc in "${services[@]}"; do
+        if systemctl is-active --quiet "$svc" 2>/dev/null; then
+            printf "  %b %-20s active\n" "$ok" "$svc"
+        elif systemctl list-unit-files --quiet "${svc}.service" 2>/dev/null | grep -q "$svc"; then
+            printf "  %b %-20s INACTIVE\n" "$fail" "$svc"
+        else
+            printf "  %b %-20s not installed\n" "$warn" "$svc"
+        fi
+    done
+
+    # --- Slurm nodes ---
+    echo ""
+    echo -e "${bold}Slurm Nodes:${NC}"
+    if command -v sinfo &>/dev/null; then
+        sinfo --noheader 2>/dev/null | sed 's/^/  /' || \
+            echo "  (sinfo unavailable — is slurmctld running?)"
+    else
+        echo "  Slurm not installed"
+    fi
+
+    # --- Active jobs ---
+    echo ""
+    echo -e "${bold}Active Jobs:${NC}"
+    if command -v squeue &>/dev/null; then
+        local job_count
+        job_count=$(squeue --noheader 2>/dev/null | wc -l)
+        if [[ "$job_count" -gt 0 ]]; then
+            squeue --noheader 2>/dev/null | sed 's/^/  /'
+        else
+            echo "  No active jobs"
+        fi
+    else
+        echo "  Slurm not installed"
+    fi
+
+    # --- OOD apps ---
+    echo ""
+    echo -e "${bold}OOD Interactive Apps:${NC}"
+    local apps_dir="/var/www/ood/apps/sys"
+    local app_dirs=(bc_desktop app_terminal app_codeserver app_applications)
+    for app in "${app_dirs[@]}"; do
+        if [[ -d "${apps_dir}/${app}" ]]; then
+            local name; name=$(grep "^name:" "${apps_dir}/${app}/manifest.yml" 2>/dev/null | awk '{$1=""; print $0}' | xargs)
+            printf "  %b %-20s %s\n" "$ok" "$app" "${name}"
+        else
+            printf "  %b %-20s missing\n" "$fail" "$app"
+        fi
+    done
+
+    # --- code-server ---
+    echo ""
+    echo -e "${bold}Tools:${NC}"
+    for tool in xpra code-server libreoffice gtkwave google-chrome xfce4-terminal gnome-terminal; do
+        local found=false
+        if [[ "$tool" == "code-server" ]]; then
+            [[ -x /opt/code-server/bin/code-server ]] && found=true
+        elif command -v "$tool" &>/dev/null; then
+            found=true
+        fi
+        if $found; then
+            printf "  %b %s\n" "$ok" "$tool"
+        else
+            printf "  %b %s NOT FOUND\n" "$fail" "$tool"
+        fi
+    done
+
+    echo ""
+}
+
 #===============================================================================
 # MAIN
 #===============================================================================
@@ -1433,6 +1852,9 @@ main() {
             ;;
         update)
             cmd_update "$@"
+            ;;
+        status)
+            cmd_status
             ;;
         -h|--help|help)
             usage
