@@ -1376,6 +1376,9 @@ setup_codeserver() {
     # Hide app from users not in app_codeserver group
     cat > "${dir}/check_login" <<'EOF'
 #!/usr/bin/env bash
+# If the group doesn't exist, show the app to everyone
+getent group app_codeserver &>/dev/null || exit 0
+# If the group exists, only show to members
 getent group app_codeserver | grep -qw "$USER"
 EOF
     chmod +x "${dir}/check_login"
@@ -1425,7 +1428,7 @@ EOF
 
     cat > "${dir}/template/before.sh.erb" <<'EOF'
 # Group access check — requires app_codeserver group membership
-if ! getent group app_codeserver | grep -qw "$USER"; then
+if getent group app_codeserver &>/dev/null && ! getent group app_codeserver | grep -qw "$USER"; then
   echo "============================================================"
   echo "ACCESS DENIED: You must be a member of the 'app_codeserver'"
   echo "group to use the VS Code (code-server) app."
