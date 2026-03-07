@@ -331,7 +331,7 @@ install_packages() {
     dnf install -y google-chrome-stable || log_warn "google-chrome install failed; check repo."
     dnf install -y libreoffice || log_warn "libreoffice install failed; check repo."
     dnf install -y code || log_warn "VS Code install failed; check vscode repo."
-    dnf install -y firefox gnome-terminal xfce4-terminal openbox || log_warn "terminal/wm apps install failed."
+    dnf install -y firefox gnome-terminal xfce4-terminal openbox xdotool wmctrl || log_warn "terminal/wm apps install failed."
 
     # Xpra HTML5
     dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
@@ -1025,10 +1025,26 @@ setup_interactive_apps() {
         fi
     done
 
+    # Well-known display name overrides (auto-capitalize fallback for unlisted apps)
+    declare -A _label_overrides=(
+        ["google-chrome"]="Google Chrome"
+        ["gtkwave"]="GTKWave"
+        ["libreoffice"]="LibreOffice"
+        ["code"]="Visual Studio Code"
+        ["xfce4-terminal"]="Xfce4 Terminal"
+        ["gnome-terminal"]="GNOME Terminal"
+        ["xterm"]="XTerm"
+    )
+
     # Build app options list for form.yml and label map for before.sh.erb title update
     local app_options="" info_labels=""
     for app in "${apps[@]}"; do
-        local display_name; display_name=$(basename "$app" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
+        local display_name
+        if [[ -n "${_label_overrides[$app]+_}" ]]; then
+            display_name="${_label_overrides[$app]}"
+        else
+            display_name=$(basename "$app" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
+        fi
         app_options+=$'\n'"      - [\"${display_name}\", \"${app}\"]"
         info_labels+=$'\n'"    \"${app}\" => \"${display_name}\","
     done
@@ -1124,19 +1140,6 @@ set -x
 
 trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
-# Write openbox config: maximize all windows
-_ob_config="${_xpra_tmp}/openbox.xml"
-cat > "${_ob_config}" <<'OBCONFIG'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <applications>
-    <application class="*">
-      <maximized>yes</maximized>
-      <decor>yes</decor>
-    </application>
-  </applications>
-</openbox_config>
-OBCONFIG
 
 <% if context.app_name == 'google-chrome' %>
 export _app_cmd="google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --user-data-dir=/tmp/chrome-\${USER}-\${SLURM_JOB_ID}"
@@ -1160,7 +1163,8 @@ xpra start \
     --bind-ws=0.0.0.0:${port} \
     --html=on \
     --ws-auth=none \
-    --start="openbox --sm-disable --config-file \${_ob_config}" \
+    --start="openbox --sm-disable" \
+    --start="bash -c 'while sleep 1; do wmctrl -l 2>/dev/null | awk \"{print \\\$1}\" | xargs -r -I{} wmctrl -i -r {} -b add,maximized_vert,maximized_horz 2>/dev/null; done'" \
     --start-child="${_app_cmd}" \
     --exit-with-children=yes \
     --daemon=no \
@@ -1206,6 +1210,14 @@ setup_terminal() {
     local dir="/var/www/ood/apps/sys/app_terminal"
     mkdir -p "${dir}/template"
 
+    # Build node options from cluster config (same pattern as setup_interactive_apps)
+    local node_options=""
+    if [[ -n "${COMPUTE_NODES:-}" ]]; then
+        for n in $COMPUTE_NODES; do
+            node_options+=$'\n'"      - [\"${n}\", \"${n}\"]"
+        done
+    fi
+
     cat > "${dir}/manifest.yml" <<'EOF'
 ---
 name: Terminal
@@ -1228,10 +1240,11 @@ attributes:
     widget: select
     label: "Terminal Emulator"
     options:
-      - ["xfce4-terminal", "xfce4-terminal"]
-      - ["gnome-terminal", "gnome-terminal"]
-      - ["xterm", "xterm"]
+      - ["Xfce4 Terminal", "xfce4-terminal"]
+      - ["GNOME Terminal", "gnome-terminal"]
+      - ["XTerm", "xterm"]
     help: "Select your preferred terminal emulator."
+    cacheable: false
   bc_num_hours:
     value: 2
   bc_num_slots:
@@ -1256,25 +1269,34 @@ script:
 <% end %>
 EOF
 
+    # Part 1: ERB terminal label map (bash-interpolated)
     cat > "${dir}/template/before.sh.erb" <<'EOF'
+<%
+  _term_labels = {
+    "xfce4-terminal" => "Xfce4 Terminal",
+    "gnome-terminal" => "GNOME Terminal",
+    "xterm"          => "XTerm"
+  }
+  _term_label = _term_labels.fetch(context.terminal_emulator.to_s, context.terminal_emulator.to_s)
+%>
 # Find available port for Xpra WebSocket server
 port=$(find_port)
 
+# Use a local tmp dir for xpra sockets and Xauthority.
 export _xpra_tmp="/var/tmp/xpra-${USER}-${port}"
 mkdir -p "${_xpra_tmp}"
 export XAUTHORITY="${_xpra_tmp}/.Xauthority"
 export XDG_RUNTIME_DIR="${_xpra_tmp}"
 
-# Update session card title
-_ood_db=$(find "${HOME}/ondemand/data" -name "<%= session.id %>" -path "*/batch_connect/db/*" 2>/dev/null | head -1)
-_app_title="Terminal - <%= context.terminal_emulator %>"
-if [[ -n "${_ood_db}" && -f "${_ood_db}" ]]; then
+# Update the session card title to show the selected terminal name
+_db_file="${HOME}/ondemand/data/sys/dashboard/batch_connect/db/<%= session.id %>"
+if [[ -f "${_db_file}" ]]; then
   python3 -c "
 import json, sys
 with open(sys.argv[1]) as f: d = json.load(f)
 d['title'] = sys.argv[2]
 with open(sys.argv[1], 'w') as f: json.dump(d, f)
-" "${_ood_db}" "${_app_title}" 2>/dev/null || true
+" "${_db_file}" "<%= _term_label %>" 2>/dev/null || true
 fi
 EOF
 
@@ -1301,6 +1323,8 @@ xpra start \
     --bind-ws=0.0.0.0:${port} \
     --html=on \
     --ws-auth=none \
+    --start="openbox --sm-disable" \
+    --start="bash -c 'while sleep 1; do wmctrl -l 2>/dev/null | awk \"{print \\\$1}\" | xargs -r -I{} wmctrl -i -r {} -b add,maximized_vert,maximized_horz 2>/dev/null; done'" \
     --start-child="${_term_cmd}" \
     --exit-with-children=yes \
     --daemon=no \
@@ -1316,6 +1340,7 @@ xpra start \
 
 echo "TIMING - Terminal exited at: $(date)"
 EOF
+    chmod +x "${dir}/template/script.sh.erb" "${dir}/template/before.sh.erb"
 
     cat > "${dir}/template/after.sh" <<'EOF'
 echo "Waiting for Xpra to open port ${port}..."
@@ -1328,6 +1353,7 @@ else
 fi
 sleep 5
 EOF
+    chmod +x "${dir}/template/after.sh"
 
     cat > "${dir}/view.html.erb" <<'EOF'
 <a href="/xpra-html5/?path=/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
@@ -1347,9 +1373,16 @@ setup_codeserver() {
     local dir="/var/www/ood/apps/sys/app_codeserver"
     mkdir -p "${dir}/template"
 
+    # Hide app from users not in app_codeserver group
+    cat > "${dir}/check_login" <<'EOF'
+#!/usr/bin/env bash
+getent group app_codeserver | grep -qw "$USER"
+EOF
+    chmod +x "${dir}/check_login"
+
     cat > "${dir}/manifest.yml" <<'EOF'
 ---
-name: VS Code
+name: Code Server
 category: Interactive Apps
 subcategory: Development
 role: batch_connect
@@ -1392,7 +1425,7 @@ EOF
 
     cat > "${dir}/template/before.sh.erb" <<'EOF'
 # Group access check — requires app_codeserver group membership
-if ! id -Gn | grep -qw "app_codeserver"; then
+if ! getent group app_codeserver | grep -qw "$USER"; then
   echo "============================================================"
   echo "ACCESS DENIED: You must be a member of the 'app_codeserver'"
   echo "group to use the VS Code (code-server) app."
@@ -1454,6 +1487,7 @@ EOF
 </a>
 EOF
 
+    chmod +x "${dir}/template/script.sh.erb" "${dir}/template/before.sh.erb" "${dir}/template/after.sh"
     log_info "VS Code (code-server) app created."
 }
 
