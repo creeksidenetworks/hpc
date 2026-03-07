@@ -702,6 +702,11 @@ OOD_DEFAULT_SSHHOST=${server_hostname}
 OOD_SSHHOST_ALLOWLIST=${server_hostname}
 EOF
 
+    # Dashboard app: remove completed session cards immediately (default is 7 days)
+    cat > /etc/ood/config/apps/dashboard/env <<EOF
+OOD_BC_CARD_TIME=0
+EOF
+
     # Parse OIDC claim and optional regex
     local oidc_claim; oidc_claim=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk '{print $1}')
     local oidc_regex; oidc_regex=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk 'NF>1{print $2}')
@@ -908,7 +913,7 @@ EOF
 }
 
 #-------------------------------------------------------------------------------
-# setup_interactive_apps: create per-app batch_connect launchers from apps.conf
+# setup_interactive_apps: create a unified Applications launcher from apps.conf
 #-------------------------------------------------------------------------------
 setup_interactive_apps() {
     log_step "Configuring interactive application launchers..."
@@ -922,40 +927,56 @@ setup_interactive_apps() {
 
     mapfile -t apps < <(grep -v '^\s*#' "$apps_conf" | grep -v '^\s*$' | awk '{print $1}')
 
+    if [[ ${#apps[@]} -eq 0 ]]; then
+        log_warn "No apps found in apps.conf; skipping."
+        return 0
+    fi
+
     local apps_dir="/var/www/ood/apps/sys"
 
+    # Remove legacy per-app launcher directories
     for app in "${apps[@]}"; do
         local safe_name; safe_name=$(echo "$app" | tr -cd '[:alnum:]_-' | tr '[:upper:]' '[:lower:]')
-        local app_dir="${apps_dir}/app_${safe_name}"
-
-        if [[ -d "$app_dir" ]]; then
-            log_info "App launcher for '${app}' already exists; skipping."
-            continue
+        local old_dir="${apps_dir}/app_${safe_name}"
+        if [[ -d "$old_dir" ]]; then
+            rm -rf "$old_dir"
+            log_info "Removed legacy per-app launcher: ${old_dir}"
         fi
+    done
 
-        log_info "Creating app launcher: ${app}"
-        mkdir -p "$app_dir/template"
-
-        # Title-case display name
+    # Build app options list for form.yml
+    local app_options=""
+    for app in "${apps[@]}"; do
         local display_name; display_name=$(basename "$app" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
+        app_options+=$'\n'"      - [\"${display_name}\", \"${app}\"]"
+    done
 
-        cat > "$app_dir/manifest.yml" <<EOF
+    local unified_dir="${apps_dir}/app_applications"
+    mkdir -p "${unified_dir}/template"
+
+    cat > "${unified_dir}/manifest.yml" <<EOF
 ---
-name: ${display_name}
+name: Applications
 category: Interactive Apps
 subcategory: Applications
 role: batch_connect
-description: Launch ${display_name} on a compute node via Xpra HTML5.
+description: Launch an interactive application on a compute node via Xpra HTML5.
 EOF
 
-        cat > "$app_dir/form.yml" <<EOF
+    cat > "${unified_dir}/form.yml" <<EOF
 ---
 cluster: "${cluster_lc}"
 form:
+  - app_name
   - bc_num_hours
   - bc_num_slots
   - bc_nodelist
 attributes:
+  app_name:
+    widget: select
+    label: "Application"
+    options:${app_options}
+    help: "Select the application to launch."
   bc_num_hours:
     value: 2
   bc_num_slots:
@@ -969,10 +990,10 @@ attributes:
     help: "Select a specific compute node."
 EOF
 
-        cat > "$app_dir/submit.yml.erb" <<'EOF'
+    cat > "${unified_dir}/submit.yml.erb" <<'EOF'
 ---
 batch_connect:
-  template: xpra
+  template: basic
 <% unless bc_nodelist.blank? %>
 script:
   native:
@@ -980,27 +1001,83 @@ script:
 <% end %>
 EOF
 
-        cat > "$app_dir/template/script.sh.erb" <<EOF
-#!/bin/bash
-# Launch ${app} in application-window mode via Xpra HTML5
+    cat > "${unified_dir}/template/before.sh.erb" <<'EOF'
+# Find available port for Xpra WebSocket server
+port=$(find_port)
 
-xpra start \\
-  --start="${app}" \\
-  --html=on \\
-  --bind-tcp=0.0.0.0:<%= port %> \\
-  --no-daemon \\
-  --exit-with-children \\
-  --start-after-connect=true \\
-  --sharing=no \\
-  --audio=no \\
-  --notifications=no \\
-  --bell=no
+# Use a local tmp dir for xpra sockets and Xauthority.
+# /home is virtiofs-mounted and xauth file locking fails there (20s timeout).
+export _xpra_tmp="/var/tmp/xpra-${USER}-${port}"
+mkdir -p "${_xpra_tmp}"
+export XAUTHORITY="${_xpra_tmp}/.Xauthority"
+export XDG_RUNTIME_DIR="${_xpra_tmp}"
 
-wait
+# Update session card title to show the selected app name
+_ood_db=\$(find "\${HOME}/ondemand/data" -name "<%= session.id %>" -path "*/batch_connect/db/*" 2>/dev/null | head -1)
+_app_title="Applications - <%= context.app_name.split('-').map { |w| w.capitalize }.join(' ') %>"
+if [[ -n "\${_ood_db}" && -f "\${_ood_db}" ]]; then
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as f: d = json.load(f)
+d['title'] = sys.argv[2]
+with open(sys.argv[1], 'w') as f: json.dump(d, f)
+" "\${_ood_db}" "\${_app_title}" 2>/dev/null || true
+fi
 EOF
-    done
 
-    log_info "Interactive app launchers configured."
+    cat > "${unified_dir}/template/script.sh.erb" <<'EOF'
+#!/usr/bin/env bash
+
+echo "TIMING - Starting <%= context.app_name %> via Xpra at: $(date)"
+cd "${HOME}"
+set -x
+
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+
+<% if context.app_name == 'google-chrome' %>
+export _app_cmd="google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --user-data-dir=/tmp/chrome-\${USER}-\${SLURM_JOB_ID}"
+<% else %>
+export _app_cmd="<%= context.app_name %>"
+<% end %>
+
+xpra start \
+    --bind-ws=0.0.0.0:${port} \
+    --html=on \
+    --ws-auth=none \
+    --start-child="${_app_cmd}" \
+    --exit-with-children=yes \
+    --daemon=no \
+    --socket-dir="${_xpra_tmp}" \
+    --pulseaudio=no \
+    --notifications=no \
+    --webcam=no \
+    --resize-display=1920x1080 \
+    --dpi=96 \
+    --desktop-scaling=off
+
+echo "TIMING - <%= context.app_name %> exited at: $(date)"
+EOF
+    chmod +x "${unified_dir}/template/script.sh.erb"
+
+    cat > "${unified_dir}/template/after.sh" <<'EOF'
+echo "Waiting for Xpra to open port ${port}..."
+if wait_until_port_used "${host}:${port}" 60; then
+    echo "Discovered Xpra listening on port ${port}!"
+else
+    echo "Timed out waiting for Xpra to open port ${port}!"
+    pkill -P ${SCRIPT_PID}
+    clean_up 1
+fi
+sleep 5
+EOF
+
+    cat > "${unified_dir}/view.html.erb" <<'EOF'
+<a href="/rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
+  <i class="fa fa-desktop"></i> Connect to Application
+</a>
+EOF
+
+    log_info "Unified Applications launcher created."
 }
 
 #-------------------------------------------------------------------------------
