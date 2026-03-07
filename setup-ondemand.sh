@@ -1,0 +1,1369 @@
+#!/bin/bash
+#===============================================================================
+# setup-ondemand.sh - Open OnDemand HPC Server Setup Script
+# Platform : Rocky Linux 8 AMD64
+# Author   : Generated for Creekside Networks HPC
+#
+# Commands:
+#   install [-c <conf_dir>]       Install Open OnDemand HPC server
+#   cpn -add    <hostname|ip>     Add a compute node to the cluster
+#   cpn -remove <hostname|ip>     Remove a compute node from the cluster
+#   update                        Sync cluster nodes from conf/cluster.conf
+#===============================================================================
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_CONF_DIR="${SCRIPT_DIR}/conf"
+CONF_DIR="${DEFAULT_CONF_DIR}"
+LOG_FILE="/var/log/setup-ondemand.log"
+
+# Default versions (overridable from hpc.conf)
+ONDEMAND_VERSION="4.1"
+SLURM_VERSION="24.05.5"
+MARIADB_VERSION="10.11"
+XPRA_VERSION="6"
+
+# Console colours
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+
+log_info()  { echo -e "${GREEN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"; }
+log_step()  { echo -e "\n${BLUE}==>${NC} $*\n" | tee -a "$LOG_FILE"; }
+die()       { log_error "$*"; exit 1; }
+
+usage() {
+    cat <<EOF
+Usage: $0 <command> [options]
+
+Commands:
+  install [-c <conf_dir>]       Install Open OnDemand HPC server
+  cpn -add    <hostname|ip>     Add a compute node to the cluster
+  cpn -remove <hostname|ip>     Remove a compute node from the cluster
+  update                        Sync cluster nodes from conf/cluster.conf
+
+Options:
+  -c <conf_dir>   Path to configuration directory (default: ./conf)
+
+Examples:
+  $0 install
+  $0 install -c /etc/hpc/conf
+  $0 cpn -add cpn01.example.com
+  $0 cpn -remove cpn02.example.com
+  $0 update
+EOF
+}
+
+#-------------------------------------------------------------------------------
+# load_config: source hpc.conf; create example files and exit if missing
+#-------------------------------------------------------------------------------
+load_config() {
+    local conf_file="${CONF_DIR}/hpc.conf"
+    if [[ ! -f "$conf_file" ]]; then
+        create_example_conf
+        echo ""
+        log_error "Config file not found: $conf_file"
+        log_error "Example configuration files have been created in: ${CONF_DIR}"
+        log_error "Please update them and re-run this script."
+        exit 1
+    fi
+
+    # shellcheck source=/dev/null
+    source "$conf_file"
+
+    # Required variables
+    local required_vars=(
+        CLUSTER_NAME SERVER_FQDN PROXY_FQDN
+        IPA_SERVER IPA_DOMAIN IPA_BASE_DN
+        OIDC_PROVIDER_METADATA_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET
+    )
+    for var in "${required_vars[@]}"; do
+        [[ -z "${!var:-}" ]] && die "Required config variable '$var' is not set in $conf_file"
+    done
+
+    # Apply defaults
+    ONDEMAND_PORT="${ONDEMAND_PORT:-8443}"
+    OIDC_SCOPE="${OIDC_SCOPE:-openid profile email}"
+    OIDC_REMOTE_USER_CLAIM="${OIDC_REMOTE_USER_CLAIM:-preferred_username}"
+    IPA_USER_BASE="${IPA_USER_BASE:-cn=users,cn=accounts,${IPA_BASE_DN}}"
+    IPA_GROUP_BASE="${IPA_GROUP_BASE:-cn=groups,cn=accounts,${IPA_BASE_DN}}"
+    IPA_HPC_GROUP="${IPA_HPC_GROUP:-hpc-users}"
+    MARIADB_SLURM_PASS="${MARIADB_SLURM_PASS:-}"
+
+    log_info "Config loaded from: $conf_file"
+}
+
+#-------------------------------------------------------------------------------
+# create_example_conf: write sample conf files so the user can fill them in
+#-------------------------------------------------------------------------------
+create_example_conf() {
+    mkdir -p "${CONF_DIR}"
+
+    if [[ ! -f "${CONF_DIR}/hpc.conf" ]]; then
+        cat > "${CONF_DIR}/hpc.conf" <<'EOF'
+# Package versions
+ONDEMAND_VERSION="4.1"
+SLURM_VERSION="24.05.5"
+MARIADB_VERSION="10.11"
+XPRA_VERSION="6"
+
+# HPC cluster identity
+CLUSTER_NAME="HPC"
+SERVER_FQDN="hpc.example.com"
+PROXY_FQDN="hpc.example.com"
+ONDEMAND_PORT=8443
+
+# FreeIPA configuration
+IPA_SERVER=ipa.example.com
+IPA_DOMAIN=example.com
+IPA_BASE_DN=dc=example,dc=com
+IPA_USER_BASE=cn=users,cn=accounts,dc=example,dc=com
+IPA_GROUP_BASE=cn=groups,cn=accounts,dc=example,dc=com
+IPA_BIND_DN=uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+IPA_BIND_PASSWORD=changeme
+IPA_HPC_GROUP=hpc-users
+
+# OIDC authentication
+# Microsoft Entra ID (Azure AD):
+#   OIDC_PROVIDER_METADATA_URL=https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration
+# Keycloak:
+#   OIDC_PROVIDER_METADATA_URL=https://keycloak.example.com/realms/<realm>/.well-known/openid-configuration
+OIDC_PROVIDER_METADATA_URL=https://login.microsoftonline.com/YOUR-TENANT-ID/v2.0/.well-known/openid-configuration
+OIDC_CLIENT_ID=YOUR-CLIENT-ID
+OIDC_CLIENT_SECRET=YOUR-CLIENT-SECRET
+
+# JWT claim mapped to POSIX username.
+# Append regex to extract a sub-match (e.g. strip domain from UPNs).
+OIDC_REMOTE_USER_CLAIM=preferred_username ^([^@]+)
+OIDC_SCOPE=openid profile email
+
+# MariaDB password for Slurm accounting DB (auto-generated if left blank)
+MARIADB_SLURM_PASS=
+EOF
+        echo "[INFO]  Created example: ${CONF_DIR}/hpc.conf"
+    fi
+
+    if [[ ! -f "${CONF_DIR}/cluster.conf" ]]; then
+        cat > "${CONF_DIR}/cluster.conf" <<'EOF'
+# Compute nodes - one hostname or IP per line.
+# This server (localhost) is registered automatically on first install.
+localhost       # this server
+#cpn01.example.com
+#cpn02.example.com
+EOF
+        echo "[INFO]  Created example: ${CONF_DIR}/cluster.conf"
+    fi
+
+    if [[ ! -f "${CONF_DIR}/apps.conf" ]]; then
+        cat > "${CONF_DIR}/apps.conf" <<'EOF'
+# Applications listed in Interactive Apps -> Applications menu.
+# One binary name per line (must be available in PATH on compute nodes).
+google-chrome
+gtkwave
+EOF
+        echo "[INFO]  Created example: ${CONF_DIR}/apps.conf"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# Preflight checks
+#-------------------------------------------------------------------------------
+check_root() {
+    [[ $EUID -eq 0 ]] || die "This script must be run as root."
+}
+
+check_ipa_joined() {
+    log_step "Checking FreeIPA membership..."
+    if ! ipa whoami &>/dev/null; then
+        log_warn "This server is not joined to FreeIPA."
+        log_warn "Join with: ipa-client-install --server=${IPA_SERVER} --domain=${IPA_DOMAIN}"
+        log_warn "Then re-run this script."
+        exit 1
+    fi
+    log_info "FreeIPA membership confirmed."
+}
+
+#-------------------------------------------------------------------------------
+# setup_slurm_user: create slurm system user at uid/gid 1000
+#-------------------------------------------------------------------------------
+setup_slurm_user() {
+    log_step "Setting up slurm system user (uid=1000, gid=1000)..."
+
+    # GID 1000
+    if getent group 1000 &>/dev/null; then
+        local g; g=$(getent group 1000 | cut -d: -f1)
+        if [[ "$g" != "slurm" ]]; then
+            log_warn "GID 1000 occupied by group '$g'. Removing it."
+            groupdel "$g" || true
+        fi
+    fi
+    if getent group slurm &>/dev/null; then
+        local existing_gid; existing_gid=$(getent group slurm | cut -d: -f3)
+        if [[ "$existing_gid" != "1000" ]]; then
+            log_warn "Group 'slurm' has GID $existing_gid (expected 1000). Recreating."
+            groupdel slurm || true
+        fi
+    fi
+    getent group slurm &>/dev/null || groupadd -r --gid=1000 slurm
+
+    # UID 1000
+    if getent passwd 1000 &>/dev/null; then
+        local u; u=$(getent passwd 1000 | cut -d: -f1)
+        if [[ "$u" != "slurm" ]]; then
+            log_warn "UID 1000 occupied by user '$u'. Removing it."
+            userdel -r "$u" 2>/dev/null || true
+        fi
+    fi
+    if getent passwd slurm &>/dev/null; then
+        local existing_uid; existing_uid=$(getent passwd slurm | cut -d: -f3)
+        if [[ "$existing_uid" != "1000" ]]; then
+            log_warn "User 'slurm' has UID $existing_uid (expected 1000). Recreating."
+            userdel -r slurm 2>/dev/null || true
+        fi
+    fi
+    getent passwd slurm &>/dev/null || \
+        useradd -r -g slurm --uid=1000 -s /sbin/nologin -d /var/lib/slurm slurm
+
+    log_info "Slurm user ready: uid=$(id -u slurm) gid=$(id -g slurm)"
+}
+
+#-------------------------------------------------------------------------------
+# install_repos: enable EPEL, PowerTools, OOD, Xpra, MariaDB repos
+#-------------------------------------------------------------------------------
+install_repos() {
+    log_step "Configuring package repositories..."
+
+    # EPEL
+    dnf install -y epel-release 2>/dev/null || \
+        dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+
+    # PowerTools (CRB) - required for some build dependencies
+    dnf install -y dnf-plugins-core
+    dnf config-manager --set-enabled powertools 2>/dev/null || \
+        dnf config-manager --set-enabled crb 2>/dev/null || true
+
+    # Open OnDemand 4.1 (el8 build for Rocky Linux 8)
+    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 2>/dev/null || true
+    if ! rpm -q ondemand-release &>/dev/null; then
+        dnf install -y \
+            "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el8.noarch.rpm" \
+            2>/dev/null || \
+        dnf install -y \
+            "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el9.noarch.rpm" \
+            2>/dev/null || \
+        log_warn "Could not install ondemand-release RPM automatically; verify the URL for your OS version."
+    fi
+
+    # Xpra 6.x
+    curl -fsSL \
+        https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/rockylinux/xpra.repo \
+        -o /etc/yum.repos.d/xpra.repo
+
+    # MariaDB
+    cat > /etc/yum.repos.d/mariadb.repo <<EOF
+[mariadb]
+name = MariaDB ${MARIADB_VERSION}
+baseurl = https://downloads.mariadb.com/MariaDB/mariadb-${MARIADB_VERSION}/yum/rhel8-amd64
+gpgkey = https://downloads.mariadb.com/MariaDB/RPM-GPG-KEY-MariaDB
+gpgcheck = 1
+enabled = 1
+EOF
+
+    # Google Chrome
+    cat > /etc/yum.repos.d/google-chrome.repo <<'EOF'
+[google-chrome]
+name=google-chrome
+baseurl=http://dl.google.com/linux/chrome/rpm/stable/x86_64
+enabled=1
+gpgcheck=1
+gpgkey=https://dl.google.com/linux/linux_signing_key.pub
+EOF
+
+    dnf makecache -q || true
+    log_info "Repositories configured."
+}
+
+#-------------------------------------------------------------------------------
+# install_packages: install all required system packages
+#-------------------------------------------------------------------------------
+install_packages() {
+    log_step "Installing system packages (this may take a while)..."
+
+    # Development tools needed to compile Slurm
+    dnf groupinstall -y "Development Tools"
+
+    # Xfce desktop + EDA GUI stack
+    dnf groupinstall -y "Xfce"
+
+    # Core packages
+    dnf install -y \
+        wget curl git vim bzip2 \
+        munge munge-devel munge-libs \
+        MariaDB-server MariaDB-client MariaDB-devel \
+        python39 python39-devel python39-pip python3-numpy \
+        pam-devel openssl-devel readline-devel \
+        numactl-devel hwloc-devel glib2-devel libcgroup \
+        pcp \
+        nmap-ncat \
+        sssd sssd-ipa sssd-tools \
+        oddjob oddjob-mkhomedir \
+        openssh-server sshpass \
+        cronie \
+        xauth xterm \
+        mod_auth_openidc \
+        lua mod_lua
+
+    # EDA / GUI applications
+    dnf install -y gtkwave || log_warn "gtkwave not found in repos; install manually."
+    dnf install -y google-chrome-stable || log_warn "google-chrome install failed; check repo."
+
+    # Xpra HTML5
+    dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
+
+    # Open OnDemand
+    dnf install -y ondemand
+
+    log_info "Package installation complete."
+}
+
+#-------------------------------------------------------------------------------
+# install_slurm: compile Slurm from source (skip if already installed)
+#-------------------------------------------------------------------------------
+install_slurm() {
+    if command -v slurmctld &>/dev/null; then
+        log_info "Slurm already installed at $(command -v slurmctld). Skipping build."
+        return 0
+    fi
+
+    log_step "Compiling Slurm ${SLURM_VERSION} from source..."
+
+    local tarball="/tmp/slurm-${SLURM_VERSION}.tar.bz2"
+    curl -fSL "https://download.schedmd.com/slurm/slurm-${SLURM_VERSION}.tar.bz2" -o "$tarball"
+    pushd /tmp >/dev/null
+    tar xf "slurm-${SLURM_VERSION}.tar.bz2"
+    pushd "slurm-${SLURM_VERSION}" >/dev/null
+    ./configure --prefix=/usr --sysconfdir=/etc/slurm
+    make -j"$(nproc)"
+    make install
+    install -D -m644 etc/cgroup.conf.example      /etc/slurm/cgroup.conf.example
+    install -D -m644 etc/slurm.conf.example       /etc/slurm/slurm.conf.example
+    install -D -m644 etc/slurmdbd.conf.example    /etc/slurm/slurmdbd.conf.example
+    install -D -m644 contribs/slurm_completion_help/slurm_completion.sh \
+                                                   /etc/profile.d/slurm_completion.sh
+    popd >/dev/null
+    rm -rf "/tmp/slurm-${SLURM_VERSION}" "$tarball"
+    popd >/dev/null
+
+    log_info "Slurm ${SLURM_VERSION} installed."
+}
+
+#-------------------------------------------------------------------------------
+# setup_slurm_dirs: create required Slurm directories
+#-------------------------------------------------------------------------------
+setup_slurm_dirs() {
+    log_step "Setting up Slurm directories..."
+    mkdir -p \
+        /etc/slurm \
+        /var/spool/slurmd \
+        /var/spool/slurmctld \
+        /var/run/slurmd \
+        /var/run/slurmdbd \
+        /var/lib/slurmd \
+        /var/log/slurm \
+        /data
+
+    touch \
+        /var/lib/slurmd/node_state \
+        /var/lib/slurmd/front_end_state \
+        /var/lib/slurmd/job_state \
+        /var/lib/slurmd/resv_state \
+        /var/lib/slurmd/trigger_state \
+        /var/lib/slurmd/assoc_mgr_state \
+        /var/lib/slurmd/assoc_usage \
+        /var/lib/slurmd/qos_usage \
+        /var/lib/slurmd/fed_mgr_state
+
+    chown -R slurm:slurm \
+        /var/spool/slurmd /var/spool/slurmctld \
+        /var/run/slurmd /var/run/slurmdbd \
+        /var/lib/slurmd /var/log/slurm
+}
+
+#-------------------------------------------------------------------------------
+# setup_munge
+#-------------------------------------------------------------------------------
+setup_munge() {
+    log_step "Setting up Munge authentication..."
+    if [[ ! -f /etc/munge/munge.key ]]; then
+        /sbin/create-munge-key
+    fi
+    chown munge:munge /etc/munge/munge.key
+    chmod 400 /etc/munge/munge.key
+    systemctl enable --now munge
+    log_info "Munge ready."
+}
+
+#-------------------------------------------------------------------------------
+# setup_mariadb: initialise MariaDB and create the slurm accounting database
+#-------------------------------------------------------------------------------
+setup_mariadb() {
+    log_step "Setting up MariaDB..."
+    systemctl enable --now mariadb
+
+    # Persist the generated password so idempotent re-runs reuse it
+    local pass_file="/etc/slurm/.mariadb_slurm_pass"
+    if [[ -f "$pass_file" ]]; then
+        MARIADB_SLURM_PASS=$(cat "$pass_file")
+    else
+        if [[ -z "${MARIADB_SLURM_PASS:-}" ]]; then
+            MARIADB_SLURM_PASS="$(openssl rand -base64 24 | tr -d '=+/')"
+        fi
+        echo "$MARIADB_SLURM_PASS" > "$pass_file"
+        chmod 600 "$pass_file"
+    fi
+
+    mysql -u root <<SQL
+CREATE DATABASE IF NOT EXISTS slurm_acct_db;
+CREATE USER IF NOT EXISTS 'slurm'@'localhost' IDENTIFIED BY '${MARIADB_SLURM_PASS}';
+GRANT ALL PRIVILEGES ON slurm_acct_db.* TO 'slurm'@'localhost';
+FLUSH PRIVILEGES;
+SQL
+    log_info "MariaDB slurm_acct_db ready."
+}
+
+#-------------------------------------------------------------------------------
+# Helpers: get_node_name, get_node_info
+#-------------------------------------------------------------------------------
+get_node_name() {
+    local host="$1"
+    local my_hostname; my_hostname=$(hostname -s)
+    local my_fqdn; my_fqdn=$(hostname -f)
+    if [[ "$host" == "localhost" || "$host" == "$my_hostname" || "$host" == "$my_fqdn" ]]; then
+        echo "$my_hostname"
+    else
+        echo "${host%%.*}"
+    fi
+}
+
+# Outputs: cpus sockets cores_per_socket threads_per_core mem_mb
+get_node_info() {
+    local host="$1"
+    local my_hostname; my_hostname=$(hostname -s)
+    local my_fqdn; my_fqdn=$(hostname -f)
+
+    if [[ "$host" == "localhost" || "$host" == "$my_hostname" || "$host" == "$my_fqdn" ]]; then
+        local cpus; cpus=$(nproc)
+        local sockets; sockets=$(lscpu | awk '/^Socket\(s\):/{print $2}')
+        local cores;   cores=$(lscpu | awk '/^Core\(s\) per socket:/{print $4}')
+        local threads; threads=$(lscpu | awk '/^Thread\(s\) per core:/{print $4}')
+        local mem;     mem=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo)
+        echo "${cpus} ${sockets:-1} ${cores:-$cpus} ${threads:-1} ${mem}"
+    else
+        local cpus sockets cores threads mem
+        cpus=$(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 root@"$host" nproc 2>/dev/null || echo 4)
+        sockets=$(ssh -o StrictHostKeyChecking=no root@"$host" \
+            "lscpu | awk '/^Socket\(s\):/{print \$2}'" 2>/dev/null || echo 1)
+        cores=$(ssh -o StrictHostKeyChecking=no root@"$host" \
+            "lscpu | awk '/^Core\(s\) per socket:/{print \$4}'" 2>/dev/null || echo "$cpus")
+        threads=$(ssh -o StrictHostKeyChecking=no root@"$host" \
+            "lscpu | awk '/^Thread\(s\) per core:/{print \$4}'" 2>/dev/null || echo 1)
+        mem=$(ssh -o StrictHostKeyChecking=no root@"$host" \
+            "awk '/^MemTotal:/{print int(\$2/1024)}' /proc/meminfo" 2>/dev/null || echo 4096)
+        echo "${cpus} ${sockets} ${cores} ${threads} ${mem}"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# configure_slurm: write slurm.conf and slurmdbd.conf (skip if already present)
+#-------------------------------------------------------------------------------
+configure_slurm() {
+    log_step "Configuring Slurm..."
+    local ctrl_host; ctrl_host=$(hostname -s)
+    local ctrl_addr; ctrl_addr=$(hostname -f)
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+
+    if [[ ! -f /etc/slurm/slurm.conf ]]; then
+        cat > /etc/slurm/slurm.conf <<EOF
+# slurm.conf - generated by setup-ondemand.sh
+ClusterName=${cluster_lc}
+ControlMachine=${ctrl_host}
+ControlAddr=${ctrl_addr}
+SlurmUser=slurm
+SlurmctldPort=6817
+SlurmdPort=6818
+AuthType=auth/munge
+StateSaveLocation=/var/lib/slurmd
+SlurmdSpoolDir=/var/spool/slurmd
+SwitchType=switch/none
+MpiDefault=none
+SlurmctldPidFile=/var/run/slurmd/slurmctld.pid
+SlurmdPidFile=/var/run/slurmd/slurmd.pid
+ProctrackType=proctrack/linuxproc
+ReturnToService=2
+DebugFlags=NO_CONF_HASH
+Prolog=/usr/local/bin/slurm-prolog.sh
+Epilog=/usr/local/bin/slurm-epilog.sh
+
+# TIMERS
+SlurmctldTimeout=300
+SlurmdTimeout=300
+InactiveLimit=0
+MinJobAge=300
+KillWait=30
+Waittime=0
+
+# SCHEDULING
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_CPU_Memory
+
+# LOGGING
+SlurmctldDebug=info
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdDebug=info
+SlurmdLogFile=/var/log/slurm/slurmd.log
+JobCompType=jobcomp/filetxt
+JobCompLoc=/var/log/slurm/jobcomp.log
+
+# ACCOUNTING
+JobAcctGatherType=jobacct_gather/linux
+JobAcctGatherFrequency=30
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost=localhost
+AccountingStorageEnforce=associations,limits,qos
+AccountingStoreFlags=job_comment
+
+# COMPUTE NODES
+# (managed by: setup-ondemand cpn -add / cpn -remove / update)
+
+# PARTITIONS
+PartitionName=compute Default=yes Nodes=ALL Priority=50 DefMemPerCPU=500 Shared=NO MaxNodes=99 MaxTime=5-00:00:00 DefaultTime=5-00:00:00 State=UP
+PartitionName=debug   Nodes=ALL Priority=50 DefMemPerCPU=500 Shared=NO MaxNodes=99 MaxTime=1:00:00 DefaultTime=1:00:00 State=UP
+EOF
+        log_info "slurm.conf written."
+    else
+        log_info "slurm.conf already exists; skipping base config."
+    fi
+
+    if [[ ! -f /etc/slurm/slurmdbd.conf ]]; then
+        cat > /etc/slurm/slurmdbd.conf <<EOF
+AuthType=auth/munge
+DbdAddr=localhost
+DbdHost=localhost
+SlurmUser=slurm
+DebugLevel=info
+LogFile=/var/log/slurm/slurmdbd.log
+PidFile=/var/run/slurmdbd/slurmdbd.pid
+StorageType=accounting_storage/mysql
+StorageHost=localhost
+StorageUser=slurm
+StoragePass=${MARIADB_SLURM_PASS}
+StorageLoc=slurm_acct_db
+EOF
+        chmod 600 /etc/slurm/slurmdbd.conf
+        chown slurm:slurm /etc/slurm/slurmdbd.conf
+        log_info "slurmdbd.conf written."
+    else
+        log_info "slurmdbd.conf already exists; skipping."
+    fi
+
+    # Prolog / epilog stubs
+    for script in /usr/local/bin/slurm-prolog.sh /usr/local/bin/slurm-epilog.sh; do
+        [[ -f "$script" ]] && continue
+        printf '#!/bin/bash\nexit 0\n' > "$script"
+        chmod +x "$script"
+    done
+}
+
+#-------------------------------------------------------------------------------
+# create_systemd_slurm: install systemd unit files for slurmctld, slurmd, slurmdbd
+#-------------------------------------------------------------------------------
+create_systemd_slurm() {
+    log_step "Creating Slurm systemd unit files..."
+
+    if [[ ! -f /etc/systemd/system/slurmctld.service ]]; then
+        cat > /etc/systemd/system/slurmctld.service <<'EOF'
+[Unit]
+Description=Slurm controller daemon
+After=network.target munge.service mariadb.service slurmdbd.service
+Requires=munge.service
+
+[Service]
+Type=forking
+User=slurm
+Group=slurm
+EnvironmentFile=-/etc/sysconfig/slurm
+ExecStart=/usr/sbin/slurmctld $SLURMCTLD_OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/var/run/slurmd/slurmctld.pid
+KillMode=process
+LimitNOFILE=65536
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    if [[ ! -f /etc/systemd/system/slurmdbd.service ]]; then
+        cat > /etc/systemd/system/slurmdbd.service <<'EOF'
+[Unit]
+Description=Slurm DBD accounting daemon
+After=network.target munge.service mariadb.service
+Requires=munge.service mariadb.service
+
+[Service]
+Type=forking
+User=slurm
+Group=slurm
+EnvironmentFile=-/etc/sysconfig/slurm
+ExecStart=/usr/sbin/slurmdbd $SLURMDBD_OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/var/run/slurmdbd/slurmdbd.pid
+KillMode=process
+LimitNOFILE=65536
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    if [[ ! -f /etc/systemd/system/slurmd.service ]]; then
+        cat > /etc/systemd/system/slurmd.service <<'EOF'
+[Unit]
+Description=Slurm node daemon
+After=network.target munge.service slurmctld.service
+Requires=munge.service
+
+[Service]
+Type=forking
+EnvironmentFile=-/etc/sysconfig/slurm
+ExecStart=/usr/sbin/slurmd $SLURMD_OPTIONS
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/var/run/slurmd/slurmd.pid
+KillMode=process
+LimitNOFILE=65536
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    [[ -f /etc/sysconfig/slurm ]] || echo "# Slurm daemon options" > /etc/sysconfig/slurm
+    systemctl daemon-reload
+    log_info "Slurm systemd units ready."
+}
+
+#-------------------------------------------------------------------------------
+# setup_ssl: generate a self-signed cert if none is present
+#-------------------------------------------------------------------------------
+setup_ssl() {
+    log_step "Setting up SSL certificate..."
+    if [[ ! -f /etc/pki/tls/certs/ood.crt ]]; then
+        openssl req -x509 -nodes -days 3650 -newkey rsa:4096 \
+            -keyout /etc/pki/tls/private/ood.key \
+            -out    /etc/pki/tls/certs/ood.crt \
+            -subj   "/CN=${SERVER_FQDN}" \
+            -addext "subjectAltName=DNS:${SERVER_FQDN},DNS:${PROXY_FQDN}"
+        chmod 600 /etc/pki/tls/private/ood.key
+        log_info "Self-signed SSL certificate generated (replace with a CA-signed cert for production)."
+    else
+        log_info "SSL certificate already present: /etc/pki/tls/certs/ood.crt"
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# configure_ood: write ood_portal.yml and cluster config
+#-------------------------------------------------------------------------------
+configure_ood() {
+    log_step "Configuring Open OnDemand..."
+    local server_hostname; server_hostname=$(hostname -s)
+    local server_fqdn;     server_fqdn=$(hostname -f)
+    local cluster_lc;      cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+
+    mkdir -p \
+        /etc/ood/config/clusters.d \
+        /etc/ood/config/apps/shell \
+        /etc/ood/config/apps/bc_desktop \
+        /etc/ood/config/apps/dashboard \
+        /etc/ood/config/ondemand.d \
+        /var/www/ood/apps/sys
+
+    # Shell app: default SSH host is this server
+    cat > /etc/ood/config/apps/shell/env <<EOF
+DEFAULT_SSHHOST=${server_hostname}
+OOD_DEFAULT_SSHHOST=${server_hostname}
+OOD_SSHHOST_ALLOWLIST=${server_hostname}
+EOF
+
+    # Parse OIDC claim and optional regex
+    local oidc_claim; oidc_claim=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk '{print $1}')
+    local oidc_regex; oidc_regex=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk 'NF>1{print $2}')
+
+    if [[ ! -f /etc/ood/config/ood_portal.yml ]]; then
+        {
+            cat <<EOF
+---
+servername: ${PROXY_FQDN}
+port: ${ONDEMAND_PORT}
+ssl:
+  - 'SSLCertificateFile "/etc/pki/tls/certs/ood.crt"'
+  - 'SSLCertificateKeyFile "/etc/pki/tls/private/ood.key"'
+node_uri: "/node"
+rnode_uri: "/rnode"
+oidc_uri: "/oidc"
+oidc_provider_metadata_url: ${OIDC_PROVIDER_METADATA_URL}
+oidc_client_id: ${OIDC_CLIENT_ID}
+oidc_client_secret: ${OIDC_CLIENT_SECRET}
+oidc_remote_user_claim: ${oidc_claim}
+EOF
+            [[ -n "$oidc_regex" ]] && echo "oidc_remote_user_claim_regex: \"${oidc_regex}\""
+            cat <<EOF
+oidc_scope: "${OIDC_SCOPE}"
+dex_uri: false
+auth:
+  - 'AuthType openid-connect'
+  - 'Require valid-user'
+EOF
+        } > /etc/ood/config/ood_portal.yml
+        # Keep a template for future re-generation
+        cp /etc/ood/config/ood_portal.yml /etc/ood/config/ood_portal.yml.tmpl
+        log_info "ood_portal.yml written."
+    else
+        log_info "ood_portal.yml already exists; skipping."
+    fi
+
+    # Cluster YAML
+    if [[ ! -f /etc/ood/config/clusters.d/hpc.yml ]]; then
+        cat > /etc/ood/config/clusters.d/hpc.yml <<EOF
+---
+v2:
+  metadata:
+    title: "${CLUSTER_NAME}"
+  login:
+    host: "${server_fqdn}"
+  job:
+    adapter: "slurm"
+    cluster: "${cluster_lc}"
+    bin: "/usr/bin"
+    conf: "/etc/slurm/slurm.conf"
+  batch_connect:
+    basic:
+      min_port: 40000
+      max_port: 65535
+    vnc:
+      min_port: 40000
+      max_port: 65535
+EOF
+        log_info "clusters.d/hpc.yml written."
+    fi
+
+    # Regenerate httpd config from ood_portal.yml
+    /opt/ood/ood-portal-generator/sbin/update_ood_portal 2>/dev/null || \
+        log_warn "update_ood_portal failed; httpd config may need manual refresh."
+
+    log_info "Open OnDemand configured."
+}
+
+#-------------------------------------------------------------------------------
+# setup_sssd: configure SSSD to authenticate against FreeIPA
+#-------------------------------------------------------------------------------
+setup_sssd() {
+    log_step "Configuring SSSD for FreeIPA..."
+
+    if [[ ! -f /etc/sssd/sssd.conf ]]; then
+        cat > /etc/sssd/sssd.conf <<EOF
+[sssd]
+services = nss, pam, ssh
+config_file_version = 2
+domains = ${IPA_DOMAIN}
+
+[nss]
+homedir_substring = /home
+
+[pam]
+offline_credentials_expiration = 60
+
+[domain/${IPA_DOMAIN}]
+id_provider = ipa
+access_provider = ipa
+ipa_server = ${IPA_SERVER}
+ipa_domain = ${IPA_DOMAIN}
+ipa_hostname = $(hostname -f)
+auth_provider = ipa
+chpass_provider = ipa
+ldap_tls_cacert = /etc/ipa/ca.crt
+cache_credentials = true
+krb5_store_password_if_offline = true
+default_shell = /bin/bash
+fallback_homedir = /home/%u
+EOF
+        chmod 600 /etc/sssd/sssd.conf
+    else
+        log_info "sssd.conf already exists; skipping."
+    fi
+
+    systemctl enable --now sssd
+    systemctl enable --now oddjobd
+    authselect select sssd with-mkhomedir --force 2>/dev/null || true
+    log_info "SSSD configured."
+}
+
+#-------------------------------------------------------------------------------
+# setup_xpra: configure Xpra HTML5 and create OOD bc_desktop app
+#-------------------------------------------------------------------------------
+setup_xpra() {
+    log_step "Configuring Xpra HTML5 client..."
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+
+    mkdir -p /etc/xpra
+    if [[ ! -f /etc/xpra/xpra.conf ]]; then
+        cat > /etc/xpra/xpra.conf <<'EOF'
+# Xpra server defaults for OOD integration
+daemon = no
+html = /usr/share/xpra/www
+encoding = auto
+audio = no
+clipboard = yes
+notifications = no
+bell = no
+sharing = no
+locks = no
+EOF
+    fi
+
+    # OOD Desktop app (Xfce via Xpra)
+    local desktop_dir="/var/www/ood/apps/sys/bc_desktop"
+    if [[ ! -d "$desktop_dir" ]]; then
+        mkdir -p "$desktop_dir/template"
+
+        cat > "$desktop_dir/manifest.yml" <<'EOF'
+---
+name: HPC Desktop
+category: Interactive Apps
+subcategory: Desktops
+role: batch_connect
+description: Launch an Xfce desktop session on a compute node via Xpra HTML5.
+EOF
+
+        cat > "$desktop_dir/form.yml" <<EOF
+---
+cluster: "${cluster_lc}"
+form:
+  - bc_num_hours
+  - bc_num_slots
+  - bc_nodelist
+  - bc_email_on_started
+attributes:
+  desktop: "xfce"
+  bc_nodelist:
+    widget: select
+    label: "Compute Node"
+    options:
+      - ["Any Node (Slurm selects automatically)", ""]
+    help: "Select a specific compute node, or let Slurm assign one automatically."
+EOF
+
+        cat > "$desktop_dir/submit.yml.erb" <<'EOF'
+---
+batch_connect:
+  template: xpra
+<% unless bc_nodelist.blank? %>
+script:
+  native:
+    - "--nodelist=<%= bc_nodelist %>"
+<% end %>
+EOF
+
+        cat > "$desktop_dir/template/script.sh.erb" <<'EOF'
+#!/bin/bash
+# Launch Xfce desktop via Xpra HTML5
+
+export DISPLAY="${DISPLAY:-:0}"
+
+xpra start \
+  --start=startxfce4 \
+  --html=on \
+  --bind-tcp=0.0.0.0:<%= port %> \
+  --no-daemon \
+  --exit-with-children \
+  --start-after-connect=true \
+  --sharing=no \
+  --audio=no \
+  --notifications=no \
+  --bell=no
+
+wait
+EOF
+        log_info "OOD Desktop (Xfce/Xpra) app created."
+    else
+        log_info "bc_desktop app already exists; skipping."
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# setup_interactive_apps: create per-app batch_connect launchers from apps.conf
+#-------------------------------------------------------------------------------
+setup_interactive_apps() {
+    log_step "Configuring interactive application launchers..."
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+
+    local apps_conf="${CONF_DIR}/apps.conf"
+    if [[ ! -f "$apps_conf" ]]; then
+        log_warn "apps.conf not found at $apps_conf; skipping app launchers."
+        return 0
+    fi
+
+    mapfile -t apps < <(grep -v '^\s*#' "$apps_conf" | grep -v '^\s*$' | awk '{print $1}')
+
+    local apps_dir="/var/www/ood/apps/sys"
+
+    for app in "${apps[@]}"; do
+        local safe_name; safe_name=$(echo "$app" | tr -cd '[:alnum:]_-' | tr '[:upper:]' '[:lower:]')
+        local app_dir="${apps_dir}/app_${safe_name}"
+
+        if [[ -d "$app_dir" ]]; then
+            log_info "App launcher for '${app}' already exists; skipping."
+            continue
+        fi
+
+        log_info "Creating app launcher: ${app}"
+        mkdir -p "$app_dir/template"
+
+        # Title-case display name
+        local display_name; display_name=$(basename "$app" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
+
+        cat > "$app_dir/manifest.yml" <<EOF
+---
+name: ${display_name}
+category: Interactive Apps
+subcategory: Applications
+role: batch_connect
+description: Launch ${display_name} on a compute node via Xpra HTML5.
+EOF
+
+        cat > "$app_dir/form.yml" <<EOF
+---
+cluster: "${cluster_lc}"
+form:
+  - bc_num_hours
+  - bc_num_slots
+  - bc_nodelist
+attributes:
+  bc_num_hours:
+    value: 2
+  bc_num_slots:
+    value: 1
+    max: 4
+  bc_nodelist:
+    widget: select
+    label: "Compute Node"
+    options:
+      - ["Any Node (Slurm selects automatically)", ""]
+    help: "Select a specific compute node."
+EOF
+
+        cat > "$app_dir/submit.yml.erb" <<'EOF'
+---
+batch_connect:
+  template: xpra
+<% unless bc_nodelist.blank? %>
+script:
+  native:
+    - "--nodelist=<%= bc_nodelist %>"
+<% end %>
+EOF
+
+        cat > "$app_dir/template/script.sh.erb" <<EOF
+#!/bin/bash
+# Launch ${app} in application-window mode via Xpra HTML5
+
+xpra start \\
+  --start="${app}" \\
+  --html=on \\
+  --bind-tcp=0.0.0.0:<%= port %> \\
+  --no-daemon \\
+  --exit-with-children \\
+  --start-after-connect=true \\
+  --sharing=no \\
+  --audio=no \\
+  --notifications=no \\
+  --bell=no
+
+wait
+EOF
+    done
+
+    log_info "Interactive app launchers configured."
+}
+
+#-------------------------------------------------------------------------------
+# setup_ipa_sync_timer: systemd timer that runs sync-slurm-ipa.sh every 10 min
+#-------------------------------------------------------------------------------
+setup_ipa_sync_timer() {
+    log_step "Setting up IPA-Slurm sync timer (every 10 minutes)..."
+
+    # Install the sync script
+    local sync_dst="/usr/local/bin/sync-slurm-ipa.sh"
+    local sync_src="${SCRIPT_DIR}/scripts/sync-slurm-ipa.sh"
+    if [[ -f "$sync_src" ]]; then
+        cp "$sync_src" "$sync_dst"
+    else
+        log_warn "sync-slurm-ipa.sh not found at ${sync_src}; installing a stub."
+        cat > "$sync_dst" <<'EOF'
+#!/bin/bash
+# IPA -> Slurm user sync stub
+# Replace with the real sync-slurm-ipa.sh from ./scripts/
+echo "$(date): sync-slurm-ipa.sh: not yet configured"
+exit 0
+EOF
+    fi
+    chmod +x "$sync_dst"
+
+    # Write IPA credentials for the sync script
+    mkdir -p /etc/hpc
+    cat > /etc/hpc/ipa.conf <<EOF
+IPA_SERVER=${IPA_SERVER}
+IPA_DOMAIN=${IPA_DOMAIN}
+IPA_BASE_DN=${IPA_BASE_DN}
+IPA_USER_BASE=${IPA_USER_BASE}
+IPA_GROUP_BASE=${IPA_GROUP_BASE}
+IPA_BIND_DN=${IPA_BIND_DN:-}
+IPA_BIND_PASSWORD=${IPA_BIND_PASSWORD:-}
+IPA_HPC_GROUP=${IPA_HPC_GROUP}
+EOF
+    chmod 600 /etc/hpc/ipa.conf
+
+    # Patch script to use /etc/hpc/ipa.conf instead of the Docker path
+    sed -i 's|/config/ipa/ipa.conf|/etc/hpc/ipa.conf|g' "$sync_dst" 2>/dev/null || true
+
+    # Systemd one-shot service
+    cat > /etc/systemd/system/sync-slurm-ipa.service <<EOF
+[Unit]
+Description=Sync FreeIPA users to Slurm accounting
+After=network.target sssd.service slurmctld.service
+
+[Service]
+Type=oneshot
+ExecStart=${sync_dst}
+StandardOutput=append:/var/log/sync-slurm-ipa.log
+StandardError=append:/var/log/sync-slurm-ipa.log
+EOF
+
+    # Systemd timer - every 10 minutes
+    cat > /etc/systemd/system/sync-slurm-ipa.timer <<'EOF'
+[Unit]
+Description=Run IPA-Slurm sync every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=sync-slurm-ipa.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable --now sync-slurm-ipa.timer
+    log_info "sync-slurm-ipa.timer enabled."
+}
+
+#-------------------------------------------------------------------------------
+# add_node_to_slurm: insert a NodeName line into slurm.conf
+#-------------------------------------------------------------------------------
+add_node_to_slurm() {
+    local host="$1"
+    local node_name; node_name=$(get_node_name "$host")
+
+    if grep -q "^NodeName=${node_name} " /etc/slurm/slurm.conf 2>/dev/null; then
+        log_warn "Node '${node_name}' already exists in slurm.conf."
+        return 0
+    fi
+
+    log_info "Detecting hardware for node: ${host}"
+    read -r cpus sockets cores threads mem <<< "$(get_node_info "$host")"
+
+    local node_addr
+    if [[ "$host" == "localhost" || "$host" == "$(hostname -s)" || "$host" == "$(hostname -f)" ]]; then
+        node_addr=$(hostname -I | awk '{print $1}')
+    else
+        node_addr="$host"
+    fi
+
+    local node_line="NodeName=${node_name} NodeAddr=${node_addr} CPUs=${cpus} Sockets=${sockets} CoresPerSocket=${cores} ThreadsPerCore=${threads} RealMemory=${mem} State=UNKNOWN"
+
+    if grep -q "^# PARTITIONS" /etc/slurm/slurm.conf 2>/dev/null; then
+        sed -i "/^# PARTITIONS/i ${node_line}" /etc/slurm/slurm.conf
+    else
+        echo "$node_line" >> /etc/slurm/slurm.conf
+    fi
+    log_info "Added to slurm.conf: ${node_line}"
+}
+
+#-------------------------------------------------------------------------------
+# remove_node_from_slurm: delete a NodeName line from slurm.conf
+#-------------------------------------------------------------------------------
+remove_node_from_slurm() {
+    local host="$1"
+    local node_name; node_name=$(get_node_name "$host")
+
+    if ! grep -q "^NodeName=${node_name} " /etc/slurm/slurm.conf 2>/dev/null; then
+        log_warn "Node '${node_name}' not found in slurm.conf."
+        return 0
+    fi
+
+    sed -i "/^NodeName=${node_name} /d" /etc/slurm/slurm.conf
+    log_info "Removed node '${node_name}' from slurm.conf."
+}
+
+#-------------------------------------------------------------------------------
+# update_ood_node_list: refresh bc_nodelist options in all OOD form.yml files
+#-------------------------------------------------------------------------------
+update_ood_node_list() {
+    log_step "Updating OOD interactive app node lists..."
+
+    # Build the new options list from slurm.conf
+    local opts
+    opts='      - ["Any Node (Slurm selects automatically)", ""]'
+    while IFS= read -r line; do
+        local name; name=$(echo "$line" | grep -oP 'NodeName=\K\S+')
+        local addr; addr=$(echo "$line" | grep -oP 'NodeAddr=\K\S+')
+        [[ -n "$name" ]] && opts+=$'\n'"      - [\"${name} (${addr})\", \"${name}\"]"
+    done < <(grep "^NodeName=" /etc/slurm/slurm.conf 2>/dev/null)
+
+    # Update every form.yml that has a bc_nodelist section
+    while IFS= read -r form_file; do
+        grep -q 'bc_nodelist' "$form_file" || continue
+        python3 - "$form_file" <<PYEOF
+import sys, re
+
+form_file = sys.argv[1]
+new_options = """${opts}"""
+
+with open(form_file) as f:
+    content = f.read()
+
+# Replace options block under bc_nodelist
+pattern = r'(  bc_nodelist:.*?options:\n)((?:      - .*\n)*)'
+replacement = r'\1' + new_options + '\n'
+new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+with open(form_file, 'w') as f:
+    f.write(new_content)
+PYEOF
+        log_info "Updated node list in: ${form_file}"
+    done < <(find /var/www/ood/apps/sys -name "form.yml" 2>/dev/null)
+}
+
+#-------------------------------------------------------------------------------
+# reconfigure_slurm: reload slurmctld after config changes
+#-------------------------------------------------------------------------------
+reconfigure_slurm() {
+    log_step "Reconfiguring Slurm..."
+    if systemctl is-active slurmctld &>/dev/null; then
+        scontrol reconfigure && log_info "Slurm reconfigured." || \
+            log_warn "scontrol reconfigure failed; restart slurmctld manually."
+    else
+        log_warn "slurmctld is not running; skipping reconfigure."
+    fi
+}
+
+#-------------------------------------------------------------------------------
+# start_services: enable and start all core services
+#-------------------------------------------------------------------------------
+start_services() {
+    log_step "Enabling and starting services..."
+    local services=(mariadb munge slurmdbd slurmctld slurmd httpd crond sshd)
+    for svc in "${services[@]}"; do
+        if systemctl list-unit-files "${svc}.service" &>/dev/null; then
+            systemctl enable --now "$svc" && log_info "Started: $svc" || \
+                log_warn "Failed to start: $svc"
+        fi
+    done
+}
+
+#===============================================================================
+# COMMANDS
+#===============================================================================
+
+cmd_install() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c) CONF_DIR="$2"; shift 2 ;;
+            *)  die "Unknown install option: $1. Usage: $0 install [-c <conf_dir>]" ;;
+        esac
+    done
+
+    check_root
+    mkdir -p "$(dirname "$LOG_FILE")"
+    : > "$LOG_FILE"
+    log_info "=== Open OnDemand HPC install started ==="
+    log_info "Config directory : ${CONF_DIR}"
+    log_info "Log              : ${LOG_FILE}"
+
+    load_config
+    check_ipa_joined
+
+    setup_slurm_user
+    install_repos
+    install_packages
+    install_slurm
+    setup_slurm_dirs
+    setup_munge
+    setup_mariadb
+    configure_slurm
+    create_systemd_slurm
+    setup_ssl
+    configure_ood
+    setup_sssd
+    setup_xpra
+    setup_interactive_apps
+    setup_ipa_sync_timer
+
+    # Register this server as the initial compute node
+    log_step "Registering this server as the initial compute node..."
+    add_node_to_slurm localhost
+    update_ood_node_list
+
+    start_services
+    reconfigure_slurm
+
+    echo ""
+    log_info "================================================================"
+    log_info " Installation complete!"
+    log_info " Open OnDemand : https://${PROXY_FQDN}:${ONDEMAND_PORT}"
+    log_info " Log file      : ${LOG_FILE}"
+    log_info "================================================================"
+}
+
+cmd_cpn_add() {
+    local host="${1:-}"
+    [[ -z "$host" ]] && die "Usage: $0 cpn -add <hostname|ip>"
+
+    check_root
+    load_config
+
+    log_info "Adding compute node: ${host}"
+    add_node_to_slurm "$host"
+    update_ood_node_list
+    reconfigure_slurm
+
+    # Persist to cluster.conf
+    local cluster_conf="${CONF_DIR}/cluster.conf"
+    local node_name; node_name=$(get_node_name "$host")
+    if [[ -f "$cluster_conf" ]] && ! grep -qE "^(${host}|${node_name})([[:space:]]|$)" "$cluster_conf"; then
+        echo "$host" >> "$cluster_conf"
+        log_info "Appended '$host' to ${cluster_conf}"
+    fi
+
+    log_info "Node '${host}' added successfully."
+}
+
+cmd_cpn_remove() {
+    local host="${1:-}"
+    [[ -z "$host" ]] && die "Usage: $0 cpn -remove <hostname|ip>"
+
+    check_root
+    load_config
+
+    log_info "Removing compute node: ${host}"
+    remove_node_from_slurm "$host"
+    update_ood_node_list
+    reconfigure_slurm
+
+    # Remove from cluster.conf
+    local cluster_conf="${CONF_DIR}/cluster.conf"
+    local node_name; node_name=$(get_node_name "$host")
+    if [[ -f "$cluster_conf" ]]; then
+        sed -i "/^${host}\([[:space:]]\|$\)/d; /^${node_name}\([[:space:]]\|$\)/d" "$cluster_conf"
+        log_info "Removed '${host}' from ${cluster_conf}"
+    fi
+
+    log_info "Node '${host}' removed successfully."
+}
+
+cmd_update() {
+    check_root
+    load_config
+
+    local cluster_conf="${CONF_DIR}/cluster.conf"
+    [[ ! -f "$cluster_conf" ]] && die "cluster.conf not found: ${cluster_conf}"
+
+    log_step "Syncing cluster nodes from ${cluster_conf}..."
+
+    # Desired nodes
+    mapfile -t desired_hosts < <(grep -v '^\s*#' "$cluster_conf" | grep -v '^\s*$' | awk '{print $1}')
+    local desired_names=()
+    for h in "${desired_hosts[@]}"; do desired_names+=("$(get_node_name "$h")"); done
+
+    # Current nodes in slurm.conf
+    mapfile -t current_names < <(grep "^NodeName=" /etc/slurm/slurm.conf 2>/dev/null | grep -oP 'NodeName=\K\S+')
+
+    # Add missing nodes
+    for i in "${!desired_hosts[@]}"; do
+        local h="${desired_hosts[$i]}"
+        local n="${desired_names[$i]}"
+        if ! printf '%s\n' "${current_names[@]}" | grep -q "^${n}$"; then
+            log_info "Adding missing node: ${h}"
+            add_node_to_slurm "$h"
+        else
+            log_info "Node already present: ${n}"
+        fi
+    done
+
+    # Remove nodes no longer in cluster.conf
+    for n in "${current_names[@]}"; do
+        if ! printf '%s\n' "${desired_names[@]}" | grep -q "^${n}$"; then
+            log_info "Removing stale node: ${n}"
+            remove_node_from_slurm "$n"
+        fi
+    done
+
+    update_ood_node_list
+    reconfigure_slurm
+    log_info "Cluster update complete."
+}
+
+#===============================================================================
+# MAIN
+#===============================================================================
+main() {
+    if [[ $# -eq 0 ]]; then
+        usage
+        exit 1
+    fi
+
+    local cmd="$1"; shift
+    case "$cmd" in
+        install)
+            cmd_install "$@"
+            ;;
+        cpn)
+            local sub="${1:-}"
+            shift
+            case "$sub" in
+                -add)    cmd_cpn_add "$@" ;;
+                -remove) cmd_cpn_remove "$@" ;;
+                *)       die "Unknown cpn subcommand: '${sub}'. Use -add or -remove." ;;
+            esac
+            ;;
+        update)
+            cmd_update "$@"
+            ;;
+        -h|--help|help)
+            usage
+            ;;
+        *)
+            die "Unknown command: '${cmd}'. Run '$0 --help' for usage."
+            ;;
+    esac
+}
+
+main "$@"
