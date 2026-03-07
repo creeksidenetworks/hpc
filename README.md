@@ -45,8 +45,8 @@ Browser  ──HTTPS──►  Open OnDemand (Apache + mod_auth_openidc)
 ### 1. Clone the repository
 
 ```bash
-git clone <repo-url> /root/hpc
-cd /root/hpc
+git clone https://github.com/creeksidenetworks/hpc.git
+cd hpc
 ```
 
 ### 2. Configure
