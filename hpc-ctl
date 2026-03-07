@@ -39,6 +39,7 @@ Usage: $0 <command> [options]
 
 Commands:
   install [-c <conf_dir>]       Install Open OnDemand HPC server
+  restart                       Restart all services and refresh OOD sessions
   status                        Show status of services, nodes, jobs, and apps
   cpn -add    <hostname|ip>     Add a compute node to the cluster
   cpn -remove <hostname|ip>     Remove a compute node from the cluster
@@ -391,8 +392,7 @@ setup_slurm_dirs() {
         /etc/slurm \
         /var/spool/slurmd \
         /var/spool/slurmctld \
-        /var/run/slurmd \
-        /var/run/slurmdbd \
+        /run/slurm \
         /var/lib/slurmd \
         /var/log/slurm \
         /data
@@ -410,7 +410,7 @@ setup_slurm_dirs() {
 
     chown -R slurm:slurm \
         /var/spool/slurmd /var/spool/slurmctld \
-        /var/run/slurmd /var/run/slurmdbd \
+        /run/slurm \
         /var/lib/slurmd /var/log/slurm
 }
 
@@ -521,8 +521,8 @@ StateSaveLocation=/var/lib/slurmd
 SlurmdSpoolDir=/var/spool/slurmd
 SwitchType=switch/none
 MpiDefault=none
-SlurmctldPidFile=/var/run/slurmd/slurmctld.pid
-SlurmdPidFile=/var/run/slurmd/slurmd.pid
+SlurmctldPidFile=/run/slurm/slurmctld.pid
+SlurmdPidFile=/run/slurm/slurmd.pid
 ProctrackType=proctrack/linuxproc
 ReturnToService=2
 DebugFlags=NO_CONF_HASH
@@ -578,7 +578,7 @@ DbdHost=localhost
 SlurmUser=slurm
 DebugLevel=info
 LogFile=/var/log/slurm/slurmdbd.log
-PidFile=/var/run/slurmdbd/slurmdbd.pid
+PidFile=/run/slurm/slurmdbd.pid
 StorageType=accounting_storage/mysql
 StorageHost=localhost
 StorageUser=slurm
@@ -620,7 +620,7 @@ Group=slurm
 EnvironmentFile=-/etc/sysconfig/slurm
 ExecStart=/usr/sbin/slurmctld $SLURMCTLD_OPTIONS
 ExecReload=/bin/kill -HUP $MAINPID
-PIDFile=/var/run/slurmd/slurmctld.pid
+PIDFile=/run/slurm/slurmctld.pid
 KillMode=process
 LimitNOFILE=65536
 Restart=on-failure
@@ -645,7 +645,7 @@ Group=slurm
 EnvironmentFile=-/etc/sysconfig/slurm
 ExecStart=/usr/sbin/slurmdbd $SLURMDBD_OPTIONS
 ExecReload=/bin/kill -HUP $MAINPID
-PIDFile=/var/run/slurmdbd/slurmdbd.pid
+PIDFile=/run/slurm/slurmdbd.pid
 KillMode=process
 LimitNOFILE=65536
 Restart=on-failure
@@ -668,7 +668,7 @@ Type=forking
 EnvironmentFile=-/etc/sysconfig/slurm
 ExecStart=/usr/sbin/slurmd $SLURMD_OPTIONS
 ExecReload=/bin/kill -HUP $MAINPID
-PIDFile=/var/run/slurmd/slurmd.pid
+PIDFile=/run/slurm/slurmd.pid
 KillMode=process
 LimitNOFILE=65536
 Restart=on-failure
@@ -1597,6 +1597,48 @@ start_services() {
     done
 }
 
+#-------------------------------------------------------------------------------
+# cmd_restart: restart all HPC services and kill user PUNs for OOD refresh
+#-------------------------------------------------------------------------------
+cmd_restart() {
+    check_root
+    log_step "Stopping Slurm services (ordered)..."
+    # Stop in reverse dependency order
+    for svc in slurmd slurmctld slurmdbd; do
+        systemctl stop "$svc" 2>/dev/null && log_info "Stopped: $svc" || true
+    done
+
+    log_step "Restarting base services..."
+    for svc in mariadb munge httpd crond sshd; do
+        systemctl restart "$svc" && log_info "Restarted: $svc" || \
+            log_warn "Failed to restart: $svc"
+    done
+
+    log_step "Starting Slurm services (ordered)..."
+    # Start in dependency order; use is-active check because Type=forking PID timing
+    # can cause systemctl start to return non-zero even when daemon starts successfully
+    slurm_start() {
+        local svc="$1" delay="${2:-3}"
+        systemctl start "$svc" 2>/dev/null; sleep "$delay"
+        if systemctl is-active --quiet "$svc"; then
+            log_info "Started: $svc"
+        else
+            log_warn "Failed to start: $svc"
+        fi
+    }
+    slurm_start slurmdbd 3
+    slurm_start slurmctld 2
+    slurm_start slurmd 1
+
+    log_step "Stopping all user PUNs (OOD will restart them on next page load)..."
+    /opt/ood/nginx_stage/sbin/nginx_stage nginx_list 2>/dev/null | while read -r user; do
+        /opt/ood/nginx_stage/sbin/nginx_stage nginx --user "$user" --signal stop 2>/dev/null && \
+            log_info "Stopped PUN for: $user" || true
+    done
+
+    log_info "Restart complete. Users will get a fresh OOD session on next page load."
+}
+
 #===============================================================================
 # COMMANDS
 #===============================================================================
@@ -1852,6 +1894,9 @@ main() {
             ;;
         update)
             cmd_update "$@"
+            ;;
+        restart)
+            cmd_restart
             ;;
         status)
             cmd_status
