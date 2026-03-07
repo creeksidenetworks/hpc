@@ -283,6 +283,15 @@ gpgcheck=1
 gpgkey=https://dl.google.com/linux/linux_signing_key.pub
 EOF
 
+    cat > /etc/yum.repos.d/vscode.repo <<'EOF'
+[code]
+name=Visual Studio Code
+baseurl=https://packages.microsoft.com/yumrepos/vscode
+enabled=1
+gpgcheck=1
+gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+EOF
+
     dnf makecache -q || true
     log_info "Repositories configured."
 }
@@ -322,7 +331,7 @@ install_packages() {
     dnf install -y google-chrome-stable || log_warn "google-chrome install failed; check repo."
     dnf install -y libreoffice || log_warn "libreoffice install failed; check repo."
     dnf install -y code || log_warn "VS Code install failed; check vscode repo."
-    dnf install -y firefox gnome-terminal xfce4-terminal || log_warn "terminal apps install failed."
+    dnf install -y firefox gnome-terminal xfce4-terminal openbox || log_warn "terminal/wm apps install failed."
 
     # Xpra HTML5
     dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
@@ -945,7 +954,10 @@ xpra start-desktop \
     --bind-ws=0.0.0.0:${port} \
     --html=on \
     --ws-auth=none \
-    --start=startxfce4 \
+    --start="openbox --sm-disable" \
+    --start="xfsettingsd" \
+    --start="xfdesktop" \
+    --start="xfce4-panel --disable-wm-check" \
     --daemon=no \
     --socket-dir="${_xpra_tmp}" \
     --pulseaudio=no \
@@ -1013,11 +1025,12 @@ setup_interactive_apps() {
         fi
     done
 
-    # Build app options list for form.yml
-    local app_options=""
+    # Build app options list for form.yml and label map for before.sh.erb title update
+    local app_options="" info_labels=""
     for app in "${apps[@]}"; do
         local display_name; display_name=$(basename "$app" | sed 's/-/ /g; s/\b\(.\)/\u\1/g')
         app_options+=$'\n'"      - [\"${display_name}\", \"${app}\"]"
+        info_labels+=$'\n'"    \"${app}\" => \"${display_name}\","
     done
 
     local unified_dir="${apps_dir}/app_applications"
@@ -1070,7 +1083,16 @@ script:
 <% end %>
 EOF
 
-    cat > "${unified_dir}/template/before.sh.erb" <<'EOF'
+    # Part 1: ERB app label map (bash-interpolated so ${info_labels} is expanded)
+    cat > "${unified_dir}/template/before.sh.erb" <<EOF
+<%
+  _app_labels = {${info_labels}
+  }
+  _app_label = _app_labels.fetch(context.app_name.to_s, context.app_name.to_s)
+%>
+EOF
+    # Part 2: static bash content (single-quoted to preserve \${USER}, \${port}, etc.)
+    cat >> "${unified_dir}/template/before.sh.erb" <<'EOF'
 # Find available port for Xpra WebSocket server
 port=$(find_port)
 
@@ -1081,16 +1103,15 @@ mkdir -p "${_xpra_tmp}"
 export XAUTHORITY="${_xpra_tmp}/.Xauthority"
 export XDG_RUNTIME_DIR="${_xpra_tmp}"
 
-# Update session card title to show the selected app name
-_ood_db=\$(find "\${HOME}/ondemand/data" -name "<%= session.id %>" -path "*/batch_connect/db/*" 2>/dev/null | head -1)
-_app_title="Applications - <%= context.app_name.split('-').map { |w| w.capitalize }.join(' ') %>"
-if [[ -n "\${_ood_db}" && -f "\${_ood_db}" ]]; then
+# Update the session card title to show the selected application name
+_db_file="${HOME}/ondemand/data/sys/dashboard/batch_connect/db/<%= session.id %>"
+if [[ -f "${_db_file}" ]]; then
   python3 -c "
 import json, sys
 with open(sys.argv[1]) as f: d = json.load(f)
 d['title'] = sys.argv[2]
 with open(sys.argv[1], 'w') as f: json.dump(d, f)
-" "\${_ood_db}" "\${_app_title}" 2>/dev/null || true
+" "${_db_file}" "<%= _app_label %>" 2>/dev/null || true
 fi
 EOF
 
@@ -1103,10 +1124,34 @@ set -x
 
 trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
+# Write openbox config: maximize all windows
+_ob_config="${_xpra_tmp}/openbox.xml"
+cat > "${_ob_config}" <<'OBCONFIG'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <applications>
+    <application class="*">
+      <maximized>yes</maximized>
+      <decor>yes</decor>
+    </application>
+  </applications>
+</openbox_config>
+OBCONFIG
+
 <% if context.app_name == 'google-chrome' %>
 export _app_cmd="google-chrome --no-sandbox --disable-dev-shm-usage --disable-gpu --user-data-dir=/tmp/chrome-\${USER}-\${SLURM_JOB_ID}"
 <% elsif context.app_name == 'code' %>
-export _app_cmd="code --no-sandbox --unity-launch"
+# Pre-create VS Code settings so the window opens maximized
+_vscode_dir="/tmp/vscode-\${USER}-\${SLURM_JOB_ID}"
+mkdir -p "\${_vscode_dir}/User"
+cat > "\${_vscode_dir}/User/settings.json" <<'VSSETTINGS'
+{
+    "window.newWindowDimensions": "maximized",
+    "window.restoreWindows": "none",
+    "window.titleBarStyle": "native"
+}
+VSSETTINGS
+export _app_cmd="/usr/share/code/code --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=\${_vscode_dir}"
 <% else %>
 export _app_cmd="<%= context.app_name %>"
 <% end %>
@@ -1115,6 +1160,7 @@ xpra start \
     --bind-ws=0.0.0.0:${port} \
     --html=on \
     --ws-auth=none \
+    --start="openbox --sm-disable --config-file \${_ob_config}" \
     --start-child="${_app_cmd}" \
     --exit-with-children=yes \
     --daemon=no \
