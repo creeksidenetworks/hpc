@@ -1,3 +1,21 @@
+# Submodule / referenced repos
 hpc-on-docker/
+
+# Documentation
 instruction.md
-hpc.conf
+
+# Sensitive config (contains credentials)
+conf/hpc.conf
+
+# Generated / runtime files
+*.log
+*.pid
+*.key
+*.crt
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+*~
+.claude/
