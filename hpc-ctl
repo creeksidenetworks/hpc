@@ -733,6 +733,25 @@ EOF
     chmod 600 /etc/slurm/slurmdbd.conf
     chown slurm:slurm /etc/slurm/slurmdbd.conf
 
+    # Fix SlurmUser=root → SlurmUser=slurm in existing conf files.
+    # slurmdbd validates that its conf is owned by SlurmUser; if SlurmUser=root
+    # but the service runs as the slurm OS user the ownership check fails.
+    for _conf in /etc/slurm/slurm.conf /etc/slurm/slurmdbd.conf; do
+        if [[ -f "$_conf" ]] && grep -q "^SlurmUser=root" "$_conf"; then
+            sed -i 's/^SlurmUser=root$/SlurmUser=slurm/' "$_conf"
+            log_info "Fixed SlurmUser=root → SlurmUser=slurm in ${_conf}"
+        fi
+    done
+
+    # Fix partition lines that reference Nodes=localhost.
+    # slurmctld fatally exits when a partition names a node that does not exist
+    # in NodeName entries; replace localhost with ALL so all registered nodes
+    # are included automatically.
+    if [[ -f /etc/slurm/slurm.conf ]] && grep -qP "^PartitionName=.*\bNodes=localhost\b" /etc/slurm/slurm.conf; then
+        sed -i -E 's/^(PartitionName=.*\b)Nodes=localhost\b/\1Nodes=ALL/' /etc/slurm/slurm.conf
+        log_info "Fixed Nodes=localhost → Nodes=ALL in partition definitions in slurm.conf"
+    fi
+
     # Prolog / epilog stubs
     for script in /usr/local/bin/slurm-prolog.sh /usr/local/bin/slurm-epilog.sh; do
         [[ -f "$script" ]] && continue

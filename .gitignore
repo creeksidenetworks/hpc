@@ -19,3 +19,4 @@ conf/hpc.conf
 *.swo
 *~
 .claude/
+conf/*.conf
