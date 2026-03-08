@@ -336,6 +336,16 @@ install_packages() {
     # Xpra HTML5
     dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
 
+    # TurboVNC + noVNC + websockify (for bc_desktop)
+    dnf install -y novnc python3-websockify || log_warn "noVNC/websockify install failed; check EPEL repo."
+    if ! rpm -q turbovnc &>/dev/null; then
+        local tvnc_rpm="/tmp/turbovnc.rpm"
+        local tvnc_url="https://github.com/TurboVNC/turbovnc/releases/download/3.1.2/turbovnc-3.1.2.x86_64.rpm"
+        log_info "Downloading TurboVNC..."
+        curl -fL "${tvnc_url}" -o "${tvnc_rpm}" && rpm -ivh "${tvnc_rpm}" && rm -f "${tvnc_rpm}" \
+            || log_warn "TurboVNC install failed; download manually from ${tvnc_url}"
+    fi
+
     # Open OnDemand
     dnf install -y ondemand
 
@@ -812,7 +822,7 @@ EOF
     cat > /etc/httpd/conf.d/xpra-proxy-fix.conf <<'EOF'
 Alias /xpra-html5 /usr/share/xpra/www
 <Directory /usr/share/xpra/www>
-    Options None
+    Options FollowSymLinks
     AllowOverride None
     Require all granted
 </Directory>
@@ -899,7 +909,7 @@ name: HPC Desktop
 category: Interactive Apps
 subcategory: Desktops
 role: batch_connect
-description: Launch an Xfce desktop session on a compute node via Xpra HTML5.
+description: Launch an Xfce desktop session on a compute node via TurboVNC + noVNC.
 EOF
 
         cat > "$desktop_dir/form.yml" <<EOF
@@ -932,62 +942,91 @@ script:
 EOF
 
         cat > "$desktop_dir/template/before.sh.erb" <<'EOF'
-# Find available port for Xpra WebSocket server
+# Find a free VNC display by checking lock files, Unix sockets, and abstract sockets
+display=1
+while [[ -f /tmp/.X${display}-lock ]] || \
+      [[ -e /tmp/.X11-unix/X${display} ]] || \
+      ss -xlnH 2>/dev/null | grep -q "@/tmp/.X11-unix/X${display}$"; do
+    display=$((display + 1))
+done
+export display
+export vnc_port=$((5900 + display))
+
+# Find a free port for websockify (OOD reverse proxy target)
 port=$(find_port)
 
-export _xpra_tmp="/var/tmp/xpra-${USER}-${port}"
-mkdir -p "${_xpra_tmp}"
-export XAUTHORITY="${_xpra_tmp}/.Xauthority"
-export XDG_RUNTIME_DIR="${_xpra_tmp}"
+export _vnc_tmp="/var/tmp/vnc-${USER}-${port}"
+mkdir -p "${_vnc_tmp}"
+export XDG_RUNTIME_DIR="${_vnc_tmp}"
 EOF
 
         cat > "$desktop_dir/template/script.sh.erb" <<'EOF'
 #!/usr/bin/env bash
 
-echo "TIMING - Starting Xfce desktop via Xpra at: $(date)"
+echo "TIMING - Starting TurboVNC desktop at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+trap '/opt/TurboVNC/bin/vncserver -kill :${display} 2>/dev/null; rm -rf "${_vnc_tmp}"' EXIT
 
-xpra start-desktop \
-    --bind-ws=0.0.0.0:${port} \
-    --html=on \
-    --ws-auth=none \
-    --start="openbox --sm-disable" \
-    --start="xfsettingsd" \
-    --start="xfdesktop" \
-    --start="xfce4-panel --disable-wm-check" \
-    --daemon=no \
-    --socket-dir="${_xpra_tmp}" \
-    --pulseaudio=no \
-    --notifications=no \
-    --webcam=no \
-    --bell=no \
-    --resize-display=yes \
-    --dpi=96
+# Create TurboVNC xstartup to launch XFCE
+mkdir -p "${HOME}/.vnc"
+cat > "${HOME}/.vnc/xstartup.turbovnc" <<'XSTARTUP'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+# Clear saved XFCE sessions to prevent restoring fullscreen/maximized window states
+rm -f "${HOME}/.config/xfce4/sessions/xfce4-session."*
+exec startxfce4
+XSTARTUP
+chmod +x "${HOME}/.vnc/xstartup.turbovnc"
+
+# Start TurboVNC (no built-in web server; websockify handles the proxy)
+/opt/TurboVNC/bin/vncserver :${display} \
+    -securitytypes none \
+    -geometry 1920x1080 \
+    -depth 24 \
+    -xstartup "${HOME}/.vnc/xstartup.turbovnc"
+
+echo "TIMING - TurboVNC started on display :${display} VNC port ${vnc_port} at: $(date)"
+
+# Wait for VNC port to be ready before starting websockify
+timeout 30 bash -c "until ss -tln | grep -q :${vnc_port}; do sleep 1; done"
+
+# Start websockify: plain HTTP WebSocket proxy -> VNC port (compatible with OOD rnode proxy)
+websockify \
+    --web /usr/share/novnc \
+    --heartbeat 30 \
+    0.0.0.0:${port} \
+    localhost:${vnc_port}
 
 echo "TIMING - Desktop exited at: $(date)"
 EOF
+        chmod +x "$desktop_dir/template/script.sh.erb" \
+                 "$desktop_dir/template/before.sh.erb"
 
         cat > "$desktop_dir/template/after.sh" <<'EOF'
-echo "Waiting for Xpra to open port ${port}..."
+echo "Waiting for websockify to open port ${port}..."
+echo "TIMING - Starting wait at: $(date)"
 if wait_until_port_used "${host}:${port}" 60; then
-    echo "Discovered Xpra listening on port ${port}!"
+    echo "Discovered websockify listening on port ${port}!"
+    echo "TIMING - Wait ended at: $(date)"
 else
-    echo "Timed out waiting for Xpra to open port ${port}!"
+    echo "Timed out waiting for websockify to open port ${port}!"
+    echo "TIMING - Wait ended at: $(date)"
     pkill -P ${SCRIPT_PID}
     clean_up 1
 fi
-sleep 5
+sleep 2
 EOF
+        chmod +x "$desktop_dir/template/after.sh"
 
         cat > "$desktop_dir/view.html.erb" <<'EOF'
-<a href="/xpra-html5/?path=/rnode/<%= host %>/<%= port %>/&autohide=1" target="_blank" class="btn btn-primary">
+<a href="/rnode/<%= host %>/<%= port %>/vnc.html?autoconnect=true&reconnect=true&resize=remote&path=rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
   <i class="fa fa-desktop"></i> Connect to Desktop
 </a>
 EOF
-        log_info "OOD Desktop (Xfce/Xpra) app created."
+        log_info "OOD Desktop (Xfce/TurboVNC/noVNC) app created."
     else
         log_info "bc_desktop app already exists; skipping."
     fi
@@ -1138,7 +1177,7 @@ echo "TIMING - Starting <%= context.app_name %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 
 <% if context.app_name == 'google-chrome' %>
@@ -1172,6 +1211,8 @@ xpra start \
     --pulseaudio=no \
     --notifications=no \
     --webcam=no \
+    --system-tray=no \
+    --tray=no \
     --resize-display=1920x1080 \
     --dpi=96 \
     --desktop-scaling=off
@@ -1307,7 +1348,7 @@ echo "TIMING - Starting <%= context.terminal_emulator %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 # DLP: determine clipboard and file-transfer permissions from group membership
 id -Gn | grep -qw "dlp_allow_clipboard" && _clip=yes || _clip=no
@@ -1332,6 +1373,8 @@ xpra start \
     --pulseaudio=no \
     --notifications=no \
     --webcam=no \
+    --system-tray=no \
+    --tray=no \
     --clipboard=${_clip} \
     --file-transfer=${_xfer} \
     --resize-display=1920x1080 \
@@ -1373,15 +1416,12 @@ setup_codeserver() {
     local dir="/var/www/ood/apps/sys/app_codeserver"
     mkdir -p "${dir}/template"
 
-    # Hide app from users not in app_codeserver group
-    cat > "${dir}/check_login" <<'EOF'
-#!/usr/bin/env bash
-# If the group doesn't exist, show the app to everyone
-getent group app_codeserver &>/dev/null || exit 0
-# If the group exists, only show to members
-getent group app_codeserver | grep -qw "$USER"
-EOF
-    chmod +x "${dir}/check_login"
+    # Restrict app visibility: OOD PUN runs as the user, so non-members of
+    # app_codeserver cannot read this directory and the app won't appear for them.
+    if getent group app_codeserver &>/dev/null; then
+        chgrp app_codeserver "${dir}"
+        chmod 750 "${dir}"
+    fi
 
     cat > "${dir}/manifest.yml" <<'EOF'
 ---
