@@ -1,0 +1,13 @@
+# cluster.conf — list of compute nodes in the HPC cluster
+# At least one node is required for the cluster to work.
+# Add one hostname or IP address per line.
+# Lines starting with # are comments.
+#
+# The HPC server itself can be listed as a compute node (single-node setup).
+# Use 'hpc.example.com' or the server's actual FQDN / IP.
+#
+# Examples:
+hpc.example.com     # this server (head node acting as compute node)
+#cpn01.example.com  # dedicated compute node 1
+#cpn02.example.com  # dedicated compute node 2
+#10.0.0.11          # compute node by IP address

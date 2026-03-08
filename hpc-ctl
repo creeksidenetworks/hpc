@@ -20,18 +20,31 @@ LOG_FILE="/var/log/hpc-ctl.log"
 
 # Default versions (overridable from hpc.conf)
 ONDEMAND_VERSION="4.1"
-SLURM_VERSION="24.05.5"
+SLURM_VERSION="20.11.9"
 MARIADB_VERSION="10.11"
 XPRA_VERSION="6"
 
 # Console colours
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+Red=$(tput setaf 1); Green=$(tput setaf 2); Yellow=$(tput setaf 3)
+Blue=$(tput setaf 4); Cyan=$(tput setaf 6)
+Bold=$(tput bold); Reset=$(tput sgr0); Dim=$(tput dim)
 
-log_info()  { echo -e "${GREEN}[INFO]${NC}  $*" | tee -a "$LOG_FILE"; }
-log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*" | tee -a "$LOG_FILE"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"; }
-log_step()  { echo -e "\n${BLUE}==>${NC} $*\n" | tee -a "$LOG_FILE"; }
-die()       { log_error "$*"; exit 1; }
+print_ok()    { echo -e "  ${Green}✓${Reset} $*" | tee -a "$LOG_FILE"; }
+print_warn()  { echo -e "  ${Yellow}⚠${Reset} $*" | tee -a "$LOG_FILE"; }
+print_error() { echo -e "  ${Red}✗${Reset} $*" | tee -a "$LOG_FILE"; }
+print_info()  { echo -e "  ${Blue}ℹ${Reset} $*" | tee -a "$LOG_FILE"; }
+print_step()  {
+    echo ""
+    echo -e "${Yellow}▶${Reset} ${Bold}$*${Reset}"
+    echo -e "${Dim}$(printf '─%.0s' $(seq 1 50))${Reset}"
+}
+
+# Keep log_* as aliases so all existing call sites continue to work
+log_info()  { print_ok "$*"; }
+log_warn()  { print_warn "$*"; }
+log_error() { print_error "$*"; }
+log_step()  { print_step "$*"; }
+die()       { print_error "$*"; exit 1; }
 
 usage() {
     cat <<EOF
@@ -74,15 +87,24 @@ load_config() {
     # shellcheck source=/dev/null
     source "$conf_file"
 
-    # Required variables
+    # Required variables — collect all missing ones before dying
     local required_vars=(
         CLUSTER_NAME SERVER_FQDN PROXY_FQDN
         IPA_SERVER IPA_DOMAIN IPA_BASE_DN
         OIDC_PROVIDER_METADATA_URL OIDC_CLIENT_ID OIDC_CLIENT_SECRET
     )
+    local missing_vars=()
     for var in "${required_vars[@]}"; do
-        [[ -z "${!var:-}" ]] && die "Required config variable '$var' is not set in $conf_file"
+        [[ -z "${!var:-}" ]] && missing_vars+=("$var")
     done
+    if [[ ${#missing_vars[@]} -gt 0 ]]; then
+        log_error "The following required variables are not set in $conf_file:"
+        for var in "${missing_vars[@]}"; do
+            log_error "  - $var"
+        done
+        log_error "Please set the above variables and re-run this script."
+        exit 1
+    fi
 
     # Apply defaults
     ONDEMAND_PORT="${ONDEMAND_PORT:-8443}"
@@ -106,7 +128,7 @@ create_example_conf() {
         cat > "${CONF_DIR}/hpc.conf" <<'EOF'
 # Package versions
 ONDEMAND_VERSION="4.1"
-SLURM_VERSION="24.05.5"
+SLURM_VERSION="20.11.9"
 MARIADB_VERSION="10.11"
 XPRA_VERSION="6"
 
@@ -188,6 +210,65 @@ check_ipa_joined() {
 }
 
 #-------------------------------------------------------------------------------
+# disable_selinux: check SELinux state and disable if active
+#-------------------------------------------------------------------------------
+disable_selinux() {
+    local selinux_status
+    selinux_status=$(getenforce 2>/dev/null || echo "Disabled")
+    case "$selinux_status" in
+        Enforcing|Permissive)
+            log_step "Disabling SELinux (currently: ${selinux_status})..."
+            setenforce 0 2>/dev/null || true
+            if [[ -f /etc/selinux/config ]]; then
+                sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config
+            fi
+            log_info "SELinux disabled (effective immediately; persistent after reboot)."
+            ;;
+        *)
+            log_info "SELinux is already disabled."
+            ;;
+    esac
+    # When SELinux is disabled the RPM selinux plugin has no context files to
+    # read and will abort any transaction.  Tell DNF/RPM to skip file-context
+    # labelling for the rest of this session.
+    export DNF_FLAGS_EXTRA="--setopt=tsflags=nocontexts"
+}
+
+#-------------------------------------------------------------------------------
+# _pkg / _grp: quiet install helpers — one result line per call
+#   -o  optional: print WARN instead of dying on failure
+#-------------------------------------------------------------------------------
+_pkg() {
+    local optional=false
+    [[ "${1:-}" == "-o" ]] && { optional=true; shift; }
+    local label="$1"; shift
+    # shellcheck disable=SC2086
+    if dnf install -y ${DNF_FLAGS_EXTRA:-} "$@" &>>"$LOG_FILE"; then
+        print_ok "$label"
+    elif $optional; then
+        print_warn "$label"
+    else
+        print_error "$label"
+        die "Package installation failed: $label"
+    fi
+}
+
+_grp() {
+    local optional=false
+    [[ "${1:-}" == "-o" ]] && { optional=true; shift; }
+    local label="$1"
+    # shellcheck disable=SC2086
+    if dnf groupinstall -y ${DNF_FLAGS_EXTRA:-} "$label" &>>"$LOG_FILE"; then
+        print_ok "group: $label"
+    elif $optional; then
+        print_warn "group: $label"
+    else
+        print_error "group: $label"
+        die "Group installation failed: $label"
+    fi
+}
+
+#-------------------------------------------------------------------------------
 # setup_slurm_user: create slurm system user at uid/gid 1000
 #-------------------------------------------------------------------------------
 setup_slurm_user() {
@@ -238,32 +319,39 @@ install_repos() {
     log_step "Configuring package repositories..."
 
     # EPEL
-    dnf install -y epel-release 2>/dev/null || \
-        dnf install -y "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm"
+    # shellcheck disable=SC2086
+    { dnf install -y ${DNF_FLAGS_EXTRA:-} epel-release &>>"$LOG_FILE" || \
+      dnf install -y ${DNF_FLAGS_EXTRA:-} "https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm" &>>"$LOG_FILE"; } \
+        && print_ok "epel-release" || { print_error "epel-release"; die "EPEL install failed."; }
 
-    # PowerTools (CRB) - required for some build dependencies
-    dnf install -y dnf-plugins-core
-    dnf config-manager --set-enabled powertools 2>/dev/null || \
-        dnf config-manager --set-enabled crb 2>/dev/null || true
+    # PowerTools (CRB)
+    _pkg "dnf-plugins-core" dnf-plugins-core
+    { dnf config-manager --set-enabled powertools &>>"$LOG_FILE" || \
+      dnf config-manager --set-enabled crb &>>"$LOG_FILE" || true; } \
+        && print_ok "powertools/crb"
 
-    # Open OnDemand 4.1 (el8 build for Rocky Linux 8)
-    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 2>/dev/null || true
-    if ! rpm -q ondemand-release &>/dev/null; then
-        dnf install -y \
+    # Open OnDemand repo
+    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 &>>"$LOG_FILE" || true
+    if rpm -q ondemand-release &>/dev/null; then
+        print_ok "ondemand-release-${ONDEMAND_VERSION} (already installed)"
+    else
+        # shellcheck disable=SC2086
+        { dnf install -y ${DNF_FLAGS_EXTRA:-} \
             "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el8.noarch.rpm" \
-            2>/dev/null || \
-        dnf install -y \
+            &>>"$LOG_FILE" || \
+          dnf install -y ${DNF_FLAGS_EXTRA:-} \
             "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el9.noarch.rpm" \
-            2>/dev/null || \
-        log_warn "Could not install ondemand-release RPM automatically; verify the URL for your OS version."
+            &>>"$LOG_FILE"; } \
+            && print_ok "ondemand-release-${ONDEMAND_VERSION}" || print_warn "ondemand-release-${ONDEMAND_VERSION}"
     fi
 
-    # Xpra 6.x
+    # Xpra repo
     curl -fsSL \
         https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/rockylinux/xpra.repo \
-        -o /etc/yum.repos.d/xpra.repo
+        -o /etc/yum.repos.d/xpra.repo &>>"$LOG_FILE" \
+        && print_ok "xpra-${XPRA_VERSION} repo" || print_warn "xpra-${XPRA_VERSION} repo"
 
-    # MariaDB
+    # MariaDB repo
     cat > /etc/yum.repos.d/mariadb.repo <<EOF
 [mariadb]
 name = MariaDB ${MARIADB_VERSION}
@@ -272,8 +360,9 @@ gpgkey = https://downloads.mariadb.com/MariaDB/RPM-GPG-KEY-MariaDB
 gpgcheck = 1
 enabled = 1
 EOF
+    print_ok "mariadb-${MARIADB_VERSION} repo"
 
-    # Google Chrome
+    # Google Chrome repo
     cat > /etc/yum.repos.d/google-chrome.repo <<'EOF'
 [google-chrome]
 name=google-chrome
@@ -282,7 +371,9 @@ enabled=1
 gpgcheck=1
 gpgkey=https://dl.google.com/linux/linux_signing_key.pub
 EOF
+    print_ok "google-chrome repo"
 
+    # VS Code repo
     cat > /etc/yum.repos.d/vscode.repo <<'EOF'
 [code]
 name=Visual Studio Code
@@ -291,65 +382,93 @@ enabled=1
 gpgcheck=1
 gpgkey=https://packages.microsoft.com/keys/microsoft.asc
 EOF
+    print_ok "vscode repo"
 
-    dnf makecache -q || true
-    log_info "Repositories configured."
+    # Refresh metadata
+    dnf makecache &>>"$LOG_FILE" && print_ok "dnf makecache" || print_warn "dnf makecache"
 }
 
 #-------------------------------------------------------------------------------
 # install_packages: install all required system packages
 #-------------------------------------------------------------------------------
 install_packages() {
-    log_step "Installing system packages (this may take a while)..."
+    log_step "Installing system packages..."
 
-    # Development tools needed to compile Slurm
-    dnf groupinstall -y "Development Tools"
+    # Development tools (needed to compile Slurm)
+    _grp "Development Tools"
 
-    # Xfce desktop + EDA GUI stack
-    dnf groupinstall -y "Xfce"
+    # Xfce desktop — optional; warn if incomplete
+    _grp -o "Xfce"
 
-    # Core packages
-    dnf install -y \
-        wget curl git vim bzip2 \
-        munge munge-devel munge-libs \
-        MariaDB-server MariaDB-client MariaDB-devel \
-        python39 python39-devel python39-pip python3-numpy \
-        pam-devel openssl-devel readline-devel \
-        numactl-devel hwloc-devel glib2-devel libcgroup \
-        pcp \
-        nmap-ncat \
-        sssd sssd-ipa sssd-tools \
-        oddjob oddjob-mkhomedir \
-        openssh-server sshpass \
-        cronie \
-        xauth xterm \
-        mod_auth_openidc \
-        lua
+    # Disable conflicting AppStream MariaDB/MySQL modules before installing
+    # from the official MariaDB repo (Rocky 8 ships mariadb:10.3/10.5 via AppStream)
+    dnf module disable -y mariadb mysql &>>"$LOG_FILE" 2>&1 || true
+    print_ok "disable module: mariadb mysql"
 
-    # EDA / GUI applications and interactive app dependencies
-    dnf install -y gtkwave || log_warn "gtkwave not found in repos; install manually."
-    dnf install -y google-chrome-stable || log_warn "google-chrome install failed; check repo."
-    dnf install -y libreoffice || log_warn "libreoffice install failed; check repo."
-    dnf install -y code || log_warn "VS Code install failed; check vscode repo."
-    dnf install -y firefox gnome-terminal xfce4-terminal openbox xdotool wmctrl || log_warn "terminal/wm apps install failed."
+    # MariaDB — with --allowerasing to replace any conflicting AppStream packages
+    _pkg "MariaDB-server MariaDB-client MariaDB-devel" \
+        --allowerasing MariaDB-server MariaDB-client MariaDB-devel
+
+    # Core utilities
+    _pkg "wget curl git vim bzip2" wget curl git vim bzip2
+
+    # Munge authentication
+    _pkg "munge munge-devel munge-libs" munge munge-devel munge-libs
+
+    # Python 3.9
+    _pkg "python39 python39-devel python39-pip python3-numpy" \
+        python39 python39-devel python39-pip python3-numpy
+
+    # System tools
+    _pkg "pcp" pcp
+    _pkg "nmap-ncat" nmap-ncat
+    _pkg "cronie" cronie
+    _pkg "openssh-server sshpass" openssh-server sshpass
+    _pkg "xauth xterm" xauth xterm
+    _pkg "mod_auth_openidc" mod_auth_openidc
+    _pkg "lua" lua
+
+    # SSSD / FreeIPA integration
+    _pkg "sssd sssd-ipa sssd-tools" sssd sssd-ipa sssd-tools
+    _pkg "oddjob oddjob-mkhomedir" oddjob oddjob-mkhomedir
+
+    # Optional GUI / EDA applications
+    _pkg -o "gtkwave" gtkwave
+    _pkg -o "google-chrome-stable" google-chrome-stable
+    _pkg -o "libreoffice" libreoffice
+    _pkg -o "code (VS Code)" code
+    _pkg -o "firefox gnome-terminal xfce4-terminal openbox xdotool wmctrl" \
+        firefox gnome-terminal xfce4-terminal openbox xdotool wmctrl
 
     # Xpra HTML5
-    dnf install -y xpra xpra-html5 || log_warn "Xpra package install failed; check xpra repo."
+    _pkg -o "xpra xpra-html5" xpra xpra-html5
 
-    # TurboVNC + noVNC + websockify (for bc_desktop)
-    dnf install -y novnc python3-websockify || log_warn "noVNC/websockify install failed; check EPEL repo."
-    if ! rpm -q turbovnc &>/dev/null; then
+    # noVNC + websockify (for bc_desktop)
+    _pkg -o "novnc python3-websockify" novnc python3-websockify
+
+    # TurboVNC (downloaded RPM — not in repos)
+    if rpm -q turbovnc &>/dev/null; then
+        print_ok "turbovnc (already installed)"
+    else
         local tvnc_rpm="/tmp/turbovnc.rpm"
         local tvnc_url="https://github.com/TurboVNC/turbovnc/releases/download/3.1.2/turbovnc-3.1.2.x86_64.rpm"
-        log_info "Downloading TurboVNC..."
-        curl -fL "${tvnc_url}" -o "${tvnc_rpm}" && rpm -ivh "${tvnc_rpm}" && rm -f "${tvnc_rpm}" \
-            || log_warn "TurboVNC install failed; download manually from ${tvnc_url}"
+        if curl -fL "${tvnc_url}" -o "${tvnc_rpm}" &>>"$LOG_FILE" && \
+           rpm -ivh ${DNF_FLAGS_EXTRA:+--nocontexts} "${tvnc_rpm}" &>>"$LOG_FILE"; then
+            print_ok "turbovnc"
+        else
+            print_warn "turbovnc"
+        fi
+        rm -f "${tvnc_rpm}" 2>/dev/null || true
     fi
 
-    # Open OnDemand
-    dnf install -y ondemand
+    # Enable nodejs:22 and ruby:3.3 AppStream modules (required by ondemand)
+    dnf module reset -y nodejs ruby &>>"$LOG_FILE" 2>&1 || true
+    dnf module enable -y nodejs:22 ruby:3.3 &>>"$LOG_FILE" 2>&1 || true
+    dnf makecache &>>"$LOG_FILE" 2>&1 || true
+    print_ok "enable module: nodejs:22 ruby:3.3"
 
-    log_info "Package installation complete."
+    # Open OnDemand
+    _pkg "ondemand" ondemand
 }
 
 #-------------------------------------------------------------------------------
@@ -357,49 +476,31 @@ install_packages() {
 #-------------------------------------------------------------------------------
 install_code_server() {
     log_step "Installing code-server..."
-
     if [[ -x /opt/code-server/bin/code-server ]]; then
-        log_info "code-server already installed: $(/opt/code-server/bin/code-server --version 2>/dev/null | head -1)"
+        print_ok "code-server (already installed)"
         return 0
     fi
-
     if curl -fsSL https://code-server.dev/install.sh | \
             sh -s -- --prefix=/opt/code-server --method=standalone &>>"$LOG_FILE"; then
-        log_info "code-server installed: $(/opt/code-server/bin/code-server --version 2>/dev/null | head -1)"
+        print_ok "code-server"
     else
-        log_warn "code-server install failed (check $LOG_FILE)"
+        print_warn "code-server"
     fi
 }
 
 #-------------------------------------------------------------------------------
-# install_slurm: compile Slurm from source (skip if already installed)
+# install_slurm: install Slurm via dnf (EPEL package, skip if already installed)
 #-------------------------------------------------------------------------------
 install_slurm() {
     if command -v slurmctld &>/dev/null; then
-        log_info "Slurm already installed at $(command -v slurmctld). Skipping build."
+        log_info "Slurm already installed at $(command -v slurmctld). Skipping."
         return 0
     fi
 
-    log_step "Compiling Slurm ${SLURM_VERSION} from source..."
+    log_step "Installing Slurm ${SLURM_VERSION} via dnf..."
 
-    local tarball="/tmp/slurm-${SLURM_VERSION}.tar.bz2"
-    curl -fSL "https://download.schedmd.com/slurm/slurm-${SLURM_VERSION}.tar.bz2" -o "$tarball"
-    pushd /tmp >/dev/null
-    tar xf "slurm-${SLURM_VERSION}.tar.bz2"
-    pushd "slurm-${SLURM_VERSION}" >/dev/null
-    ./configure --prefix=/usr --sysconfdir=/etc/slurm
-    make -j"$(nproc)"
-    make install
-    install -D -m644 etc/cgroup.conf.example      /etc/slurm/cgroup.conf.example
-    install -D -m644 etc/slurm.conf.example       /etc/slurm/slurm.conf.example
-    install -D -m644 etc/slurmdbd.conf.example    /etc/slurm/slurmdbd.conf.example
-    install -D -m644 contribs/slurm_completion_help/slurm_completion.sh \
-                                                   /etc/profile.d/slurm_completion.sh
-    popd >/dev/null
-    rm -rf "/tmp/slurm-${SLURM_VERSION}" "$tarball"
-    popd >/dev/null
-
-    log_info "Slurm ${SLURM_VERSION} installed."
+    _pkg "slurm slurm-slurmctld slurm-slurmd slurm-slurmdbd slurm-contribs slurm-pam_slurm" \
+        slurm slurm-slurmctld slurm-slurmd slurm-slurmdbd slurm-contribs slurm-pam_slurm
 }
 
 #-------------------------------------------------------------------------------
@@ -1766,6 +1867,54 @@ cmd_restart() {
 # COMMANDS
 #===============================================================================
 
+#-------------------------------------------------------------------------------
+# print_config_summary: display resolved config values and prompt for confirmation
+#-------------------------------------------------------------------------------
+print_config_summary() {
+    local width=60
+    echo ""
+    printf "${Cyan}%s${Reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
+    printf "${Cyan}║${Reset}%*s${Bold}%s${Reset}%*s${Cyan}║${Reset}\n" 5 "" "Open OnDemand HPC — Configuration Summary" 14 ""
+    printf "${Cyan}%s${Reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
+    echo ""
+    echo -e "  Cluster Name        : ${Bold}${CLUSTER_NAME}${Reset}"
+    echo -e "  Server FQDN         : ${SERVER_FQDN}"
+    echo -e "  Proxy FQDN          : ${PROXY_FQDN}"
+    echo -e "  OOD Port            : ${ONDEMAND_PORT}"
+    echo ""
+    echo -e "  FreeIPA Server      : ${IPA_SERVER}"
+    echo -e "  FreeIPA Domain      : ${IPA_DOMAIN}"
+    echo -e "  FreeIPA Base DN     : ${IPA_BASE_DN}"
+    echo -e "  HPC User Group      : ${IPA_HPC_GROUP}"
+    echo ""
+    echo -e "  OIDC Metadata URL   : ${OIDC_PROVIDER_METADATA_URL}"
+    echo -e "  OIDC Client ID      : ${OIDC_CLIENT_ID}"
+    echo -e "  OIDC Client Secret  : ${OIDC_CLIENT_SECRET:0:4}****"
+    echo -e "  OIDC Scope          : ${OIDC_SCOPE}"
+    echo -e "  Remote User Claim   : ${OIDC_REMOTE_USER_CLAIM}"
+    echo ""
+    echo -e "  Package Versions:"
+    echo -e "    Open OnDemand     : ${ONDEMAND_VERSION}"
+    echo -e "    Slurm             : ${SLURM_VERSION}"
+    echo -e "    MariaDB           : ${MARIADB_VERSION}"
+    echo -e "    Xpra              : ${XPRA_VERSION}"
+    echo ""
+    echo -e "  Config Directory    : ${CONF_DIR}"
+    echo -e "  Log File            : ${LOG_FILE}"
+    echo ""
+    printf "${Cyan}%s${Reset}\n" "$(printf '═%.0s' $(seq 1 $width))"
+    echo ""
+    read -r -p "Proceed with installation? [y/N] " _confirm
+    case "$_confirm" in
+        [yY][eE][sS]|[yY]) ;;
+        *)
+            log_info "Installation cancelled by user."
+            exit 0
+            ;;
+    esac
+    echo ""
+}
+
 cmd_install() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1782,6 +1931,8 @@ cmd_install() {
     log_info "Log              : ${LOG_FILE}"
 
     load_config
+    print_config_summary
+    disable_selinux
     check_ipa_joined
 
     setup_slurm_user
@@ -1911,31 +2062,28 @@ cmd_update() {
 # cmd_status: show health of all HPC services, Slurm nodes, and OOD apps
 #-------------------------------------------------------------------------------
 cmd_status() {
-    local ok="${GREEN}✓${NC}"
-    local fail="${RED}✗${NC}"
-    local warn="${YELLOW}!${NC}"
-    local bold='\033[1m'
-
     echo ""
-    echo -e "${bold}=== HPC System Status ===${NC}"
+    echo -e "${Cyan}$(printf '═%.0s' $(seq 1 50))${Reset}"
+    echo -e "${Cyan}║${Reset}  ${Bold}HPC System Status${Reset}"
+    echo -e "${Cyan}$(printf '═%.0s' $(seq 1 50))${Reset}"
     echo ""
 
     # --- Services ---
-    echo -e "${bold}Services:${NC}"
+    echo -e "${Bold}Services:${Reset}"
     local services=(mariadb munge slurmdbd slurmctld slurmd httpd crond sshd)
     for svc in "${services[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null; then
-            printf "  %b %-20s active\n" "$ok" "$svc"
+            printf "  ${Green}✓${Reset} %-20s active\n" "$svc"
         elif systemctl list-unit-files --quiet "${svc}.service" 2>/dev/null | grep -q "$svc"; then
-            printf "  %b %-20s INACTIVE\n" "$fail" "$svc"
+            printf "  ${Red}✗${Reset} %-20s INACTIVE\n" "$svc"
         else
-            printf "  %b %-20s not installed\n" "$warn" "$svc"
+            printf "  ${Yellow}⚠${Reset} %-20s not installed\n" "$svc"
         fi
     done
 
     # --- Slurm nodes ---
     echo ""
-    echo -e "${bold}Slurm Nodes:${NC}"
+    echo -e "${Bold}Slurm Nodes:${Reset}"
     if command -v sinfo &>/dev/null; then
         sinfo --noheader 2>/dev/null | sed 's/^/  /' || \
             echo "  (sinfo unavailable — is slurmctld running?)"
@@ -1945,7 +2093,7 @@ cmd_status() {
 
     # --- Active jobs ---
     echo ""
-    echo -e "${bold}Active Jobs:${NC}"
+    echo -e "${Bold}Active Jobs:${Reset}"
     if command -v squeue &>/dev/null; then
         local job_count
         job_count=$(squeue --noheader 2>/dev/null | wc -l)
@@ -1960,21 +2108,21 @@ cmd_status() {
 
     # --- OOD apps ---
     echo ""
-    echo -e "${bold}OOD Interactive Apps:${NC}"
+    echo -e "${Bold}OOD Interactive Apps:${Reset}"
     local apps_dir="/var/www/ood/apps/sys"
     local app_dirs=(bc_desktop app_terminal app_codeserver app_applications)
     for app in "${app_dirs[@]}"; do
         if [[ -d "${apps_dir}/${app}" ]]; then
             local name; name=$(grep "^name:" "${apps_dir}/${app}/manifest.yml" 2>/dev/null | awk '{$1=""; print $0}' | xargs)
-            printf "  %b %-20s %s\n" "$ok" "$app" "${name}"
+            printf "  ${Green}✓${Reset} %-20s %s\n" "$app" "${name}"
         else
-            printf "  %b %-20s missing\n" "$fail" "$app"
+            printf "  ${Red}✗${Reset} %-20s missing\n" "$app"
         fi
     done
 
-    # --- code-server ---
+    # --- Tools ---
     echo ""
-    echo -e "${bold}Tools:${NC}"
+    echo -e "${Bold}Tools:${Reset}"
     for tool in xpra code-server libreoffice gtkwave google-chrome xfce4-terminal gnome-terminal; do
         local found=false
         if [[ "$tool" == "code-server" ]]; then
@@ -1983,9 +2131,9 @@ cmd_status() {
             found=true
         fi
         if $found; then
-            printf "  %b %s\n" "$ok" "$tool"
+            printf "  ${Green}✓${Reset} %s\n" "$tool"
         else
-            printf "  %b %s NOT FOUND\n" "$fail" "$tool"
+            printf "  ${Red}✗${Reset} %s NOT FOUND\n" "$tool"
         fi
     done
 

@@ -1,0 +1,45 @@
+# Package versions (override defaults if needed)
+ONDEMAND_VERSION="4.1"
+SLURM_VERSION="20.11.9"
+MARIADB_VERSION="10.11"
+XPRA_VERSION="6"
+
+# HPC cluster identity
+CLUSTER_NAME="HPC"
+SERVER_FQDN="hpc.example.com"
+PROXY_FQDN="hpc.example.com"
+ONDEMAND_PORT=8443
+
+# FreeIPA — user/group management and LDAP authentication
+IPA_SERVER=ipa.example.com
+IPA_DOMAIN=example.com
+IPA_BASE_DN=dc=example,dc=com
+IPA_USER_BASE=cn=users,cn=accounts,dc=example,dc=com
+IPA_GROUP_BASE=cn=groups,cn=accounts,dc=example,dc=com
+IPA_BIND_DN=uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+IPA_BIND_PASSWORD=your-ldap-bind-password
+IPA_HPC_GROUP=hpc-users
+
+# OIDC / OAuth2 authentication
+# Supported providers:
+#   Microsoft Entra ID (Azure AD):
+#     OIDC_PROVIDER_METADATA_URL=https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration
+#
+#   Keycloak:
+#     OIDC_PROVIDER_METADATA_URL=https://keycloak.example.com/realms/<realm>/.well-known/openid-configuration
+#
+AUTHENTICATION_METHOD=oidc
+OIDC_PROVIDER_METADATA_URL=https://login.microsoftonline.com/<tenant-id>/v2.0/.well-known/openid-configuration
+
+# OAuth2 client credentials registered with your OIDC provider.
+# Register redirect URI: https://<PROXY_FQDN>/oidc/callback/
+OIDC_CLIENT_ID=your-client-id
+OIDC_CLIENT_SECRET=your-client-secret
+
+# JWT claim that maps to the POSIX username on the HPC system.
+# Append a regex to extract a sub-match if the claim contains a domain suffix.
+# Entra ID UPNs (e.g. user@example.com) — strip domain with ^([^@]+)
+OIDC_REMOTE_USER_CLAIM="preferred_username ^([^@]+)"
+
+# Scopes to request. Add "groups" if your provider surfaces group membership.
+OIDC_SCOPE="openid profile email"

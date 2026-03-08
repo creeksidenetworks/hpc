@@ -1,0 +1,12 @@
+# apps.conf — list of desktop applications to expose in the OOD Applications launcher
+# Add one application name per line (must be findable via `which` or known path).
+# Lines starting with # are comments.
+#
+# Examples:
+google-chrome
+gtkwave
+libreoffice
+code
+#matlab
+#ansys
+#vmd
