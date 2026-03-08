@@ -331,7 +331,6 @@ install_repos() {
         && print_ok "powertools/crb"
 
     # Open OnDemand repo
-    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 &>>"$LOG_FILE" || true
     if rpm -q ondemand-release &>/dev/null; then
         print_ok "ondemand-release-${ONDEMAND_VERSION} (already installed)"
     else
@@ -344,6 +343,7 @@ install_repos() {
             &>>"$LOG_FILE"; } \
             && print_ok "ondemand-release-${ONDEMAND_VERSION}" || print_warn "ondemand-release-${ONDEMAND_VERSION}"
     fi
+    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 &>>"$LOG_FILE" || true
 
     # Xpra repo
     curl -fsSL \
