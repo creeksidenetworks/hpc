@@ -415,7 +415,7 @@ EOF
     print_ok "vscode repo"
 
     # Refresh metadata
-    #dnf makecache &>>"$LOG_FILE" && print_ok "dnf makecache" || print_warn "dnf makecache"
+    dnf makecache -y &>>"$LOG_FILE" && print_ok "dnf makecache" || print_warn "dnf makecache"
 }
 
 #-------------------------------------------------------------------------------
