@@ -1351,7 +1351,9 @@ EOF
 
     # OOD Desktop app (Xfce via Xpra)
     local desktop_dir="/var/www/ood/apps/sys/bc_desktop"
+    local desktop_dir_existed=true
     if [[ ! -d "$desktop_dir" ]]; then
+        desktop_dir_existed=false
         mkdir -p "$desktop_dir/template"
 
         cat > "$desktop_dir/manifest.yml" <<'EOF'
@@ -1362,8 +1364,11 @@ subcategory: Desktops
 role: batch_connect
 description: Launch an Xfce desktop session on a compute node via TurboVNC + noVNC.
 EOF
+    fi
 
-        cat > "$desktop_dir/form.yml" <<EOF
+    # Always write form.yml so cluster is set correctly even if the directory
+    # was pre-installed by the OOD package (which ships without cluster: set).
+    cat > "$desktop_dir/form.yml" <<EOF
 ---
 cluster: "${cluster_lc}"
 attributes:
@@ -1380,8 +1385,14 @@ form:
   - bc_nodelist
   - bc_email_on_started
 EOF
+    log_info "bc_desktop form.yml written (cluster=${cluster_lc})."
 
-        cat > "$desktop_dir/submit.yml.erb" <<'EOF'
+    # Always ensure the template directory exists (may not if dir was pre-installed).
+    mkdir -p "$desktop_dir/template"
+
+    # Always write these files so they override whatever the OOD package installed
+    # (the package ships template: vnc and scripts referencing context.desktop).
+    cat > "$desktop_dir/submit.yml.erb" <<'EOF'
 ---
 batch_connect:
   template: basic
@@ -1392,7 +1403,7 @@ script:
 <% end %>
 EOF
 
-        cat > "$desktop_dir/template/before.sh.erb" <<'EOF'
+    cat > "$desktop_dir/template/before.sh.erb" <<'EOF'
 # Find a free VNC display by checking lock files, Unix sockets, and abstract sockets
 display=1
 while [[ -f /tmp/.X${display}-lock ]] || \
@@ -1411,7 +1422,7 @@ mkdir -p "${_vnc_tmp}"
 export XDG_RUNTIME_DIR="${_vnc_tmp}"
 EOF
 
-        cat > "$desktop_dir/template/script.sh.erb" <<'EOF'
+    cat > "$desktop_dir/template/script.sh.erb" <<'EOF'
 #!/usr/bin/env bash
 
 echo "TIMING - Starting TurboVNC desktop at: $(date)"
@@ -1453,10 +1464,10 @@ websockify \
 
 echo "TIMING - Desktop exited at: $(date)"
 EOF
-        chmod +x "$desktop_dir/template/script.sh.erb" \
-                 "$desktop_dir/template/before.sh.erb"
+    chmod +x "$desktop_dir/template/script.sh.erb" \
+             "$desktop_dir/template/before.sh.erb"
 
-        cat > "$desktop_dir/template/after.sh" <<'EOF'
+    cat > "$desktop_dir/template/after.sh" <<'EOF'
 echo "Waiting for websockify to open port ${port}..."
 echo "TIMING - Starting wait at: $(date)"
 if wait_until_port_used "${host}:${port}" 60; then
@@ -1470,16 +1481,18 @@ else
 fi
 sleep 2
 EOF
-        chmod +x "$desktop_dir/template/after.sh"
+    chmod +x "$desktop_dir/template/after.sh"
 
-        cat > "$desktop_dir/view.html.erb" <<'EOF'
+    cat > "$desktop_dir/view.html.erb" <<'EOF'
 <a href="/rnode/<%= host %>/<%= port %>/vnc.html?autoconnect=true&reconnect=true&resize=remote&path=rnode/<%= host %>/<%= port %>/" target="_blank" class="btn btn-primary">
   <i class="fa fa-desktop"></i> Connect to Desktop
 </a>
 EOF
+
+    if [[ "$desktop_dir_existed" == false ]]; then
         log_info "OOD Desktop (Xfce/TurboVNC/noVNC) app created."
     else
-        log_info "bc_desktop app already exists; skipping."
+        log_info "OOD Desktop app files updated (overrode OOD package defaults)."
     fi
 }
 
@@ -2177,8 +2190,11 @@ new_options = """${opts}"""
 with open(form_file) as f:
     content = f.read()
 
-# Replace options block under bc_nodelist
-pattern = r'(  bc_nodelist:.*?options:\n)((?:      - .*\n)*)'
+# Replace options block under bc_nodelist.
+# Use [^\n]* instead of .* in the options group so re.DOTALL (needed for
+# group 1 to match across lines) doesn't cause option lines to greedily
+# consume the rest of the file including the form: section.
+pattern = r'(  bc_nodelist:.*?options:\n)((?:      - [^\n]*\n)*)'
 replacement = r'\1' + new_options + '\n'
 new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
