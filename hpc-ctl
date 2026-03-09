@@ -242,6 +242,15 @@ _pkg() {
     local optional=false
     [[ "${1:-}" == "-o" ]] && { optional=true; shift; }
     local label="$1"; shift
+    # Skip if all packages are already installed
+    local all_installed=true
+    for pkg in "$@"; do
+        rpm -q "$pkg" &>/dev/null || { all_installed=false; break; }
+    done
+    if $all_installed; then
+        print_ok "$label (already installed)"
+        return 0
+    fi
     # shellcheck disable=SC2086
     if dnf install -y ${DNF_FLAGS_EXTRA:-} "$@" &>>"$LOG_FILE"; then
         print_ok "$label"
@@ -257,6 +266,11 @@ _grp() {
     local optional=false
     [[ "${1:-}" == "-o" ]] && { optional=true; shift; }
     local label="$1"
+    # Skip if group is already installed
+    if dnf group list installed 2>/dev/null | grep -qi "^[[:space:]]*${label}$"; then
+        print_ok "group: $label (already installed)"
+        return 0
+    fi
     # shellcheck disable=SC2086
     if dnf groupinstall -y ${DNF_FLAGS_EXTRA:-} "$label" &>>"$LOG_FILE"; then
         print_ok "group: $label"
@@ -330,6 +344,8 @@ install_repos() {
       dnf config-manager --set-enabled crb &>>"$LOG_FILE" || true; } \
         && print_ok "powertools/crb"
 
+    yes | rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 &>>"$LOG_FILE" || true
+
     # Open OnDemand repo
     if rpm -q ondemand-release &>/dev/null; then
         print_ok "ondemand-release-${ONDEMAND_VERSION} (already installed)"
@@ -343,8 +359,7 @@ install_repos() {
             &>>"$LOG_FILE"; } \
             && print_ok "ondemand-release-${ONDEMAND_VERSION}" || print_warn "ondemand-release-${ONDEMAND_VERSION}"
     fi
-    rpm --import https://yum.osc.edu/ondemand/RPM-GPG-KEY-ondemand-SHA512 &>>"$LOG_FILE" || true
-
+    
     # Xpra repo
     curl -fsSL \
         https://raw.githubusercontent.com/Xpra-org/xpra/master/packaging/repos/rockylinux/xpra.repo \
@@ -2075,6 +2090,33 @@ register_slurm_cluster() {
 #-------------------------------------------------------------------------------
 # start_services: enable and start all core services
 #-------------------------------------------------------------------------------
+setup_firewall() {
+    log_step "Opening firewall ports for httpd and Slurm..."
+    if ! command -v firewall-cmd &>/dev/null; then
+        log_warn "firewall-cmd not found — skipping firewall configuration"
+        return
+    fi
+    if ! systemctl is-active --quiet firewalld; then
+        log_warn "firewalld is not running — skipping firewall configuration"
+        return
+    fi
+
+    local ports=(
+        "${ONDEMAND_PORT:-8443}/tcp"   # httpd / Open OnDemand
+        "6817/tcp"                      # slurmctld
+        "6818/tcp"                      # slurmd
+    )
+    for port in "${ports[@]}"; do
+        if firewall-cmd --query-port="$port" --permanent &>/dev/null; then
+            log_info "Port already open: $port"
+        else
+            firewall-cmd --add-port="$port" --permanent && log_info "Opened port: $port" || \
+                log_warn "Failed to open port: $port"
+        fi
+    done
+    firewall-cmd --reload && log_info "Firewall reloaded" || log_warn "Firewall reload failed"
+}
+
 start_services() {
     log_step "Enabling and starting services..."
 
@@ -2254,6 +2296,7 @@ cmd_install() {
     update_ood_node_list
 
     start_services
+    setup_firewall
     register_slurm_cluster
     reconfigure_slurm
 
@@ -2263,6 +2306,8 @@ cmd_install() {
     log_info " Open OnDemand : https://${PROXY_FQDN}:${ONDEMAND_PORT}"
     log_info " Log file      : ${LOG_FILE}"
     log_info "================================================================"
+
+    cmd_status
 }
 
 cmd_cpn_add() {
