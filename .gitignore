@@ -19,4 +19,5 @@ conf/hpc.conf
 *.swo
 *~
 .claude/
-conf/*.conf
+*.conf
+*.out

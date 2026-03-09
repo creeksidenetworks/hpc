@@ -678,7 +678,7 @@ Waittime=0
 # SCHEDULING
 SchedulerType=sched/backfill
 SelectType=select/cons_tres
-SelectTypeParameters=CR_CPU_Memory
+SelectTypeParameters=CR_CPU
 
 # LOGGING
 SlurmctldDebug=info
@@ -700,8 +700,8 @@ AccountingStoreFlags=job_comment
 # (managed by: hpc-ctl cpn -add / cpn -remove / update)
 
 # PARTITIONS
-PartitionName=compute Default=yes Nodes=ALL Priority=50 DefMemPerCPU=500 Shared=NO MaxNodes=99 MaxTime=5-00:00:00 DefaultTime=5-00:00:00 State=UP
-PartitionName=debug   Nodes=ALL Priority=50 DefMemPerCPU=500 Shared=NO MaxNodes=99 MaxTime=1:00:00 DefaultTime=1:00:00 State=UP
+PartitionName=compute Default=yes Nodes=ALL Priority=50 Shared=NO MaxNodes=99 MaxTime=5-00:00:00 DefaultTime=5-00:00:00 State=UP
+PartitionName=debug   Nodes=ALL Priority=50 Shared=NO MaxNodes=99 MaxTime=1:00:00 DefaultTime=1:00:00 State=UP
 EOF
         log_info "slurm.conf written."
     else
@@ -733,6 +733,32 @@ EOF
     chmod 600 /etc/slurm/slurmdbd.conf
     chown slurm:slurm /etc/slurm/slurmdbd.conf
 
+    # Enforce correct StorageUser/StoragePass in slurmdbd.conf.
+    # A pre-existing slurmdbd.conf may have StorageUser=root with a wrong
+    # password, preventing slurmdbd from connecting to MariaDB.
+    local pass_file="/etc/slurm/.mariadb_slurm_pass"
+    if [[ -f /etc/slurm/slurmdbd.conf && -f "$pass_file" ]]; then
+        local _pass; _pass=$(cat "$pass_file")
+        if ! grep -qE "^StorageUser=slurm$" /etc/slurm/slurmdbd.conf; then
+            if grep -qE "^StorageUser=" /etc/slurm/slurmdbd.conf; then
+                sed -i -E "s/^StorageUser=.*$/StorageUser=slurm/" /etc/slurm/slurmdbd.conf
+            else
+                echo "StorageUser=slurm" >> /etc/slurm/slurmdbd.conf
+            fi
+            log_info "Fixed StorageUser=slurm in slurmdbd.conf"
+        fi
+        if ! grep -qE "^StoragePass=${_pass}$" /etc/slurm/slurmdbd.conf; then
+            if grep -qE "^StoragePass=" /etc/slurm/slurmdbd.conf; then
+                sed -i -E "s/^StoragePass=.*$/StoragePass=${_pass}/" /etc/slurm/slurmdbd.conf
+            else
+                echo "StoragePass=${_pass}" >> /etc/slurm/slurmdbd.conf
+            fi
+            log_info "Fixed StoragePass in slurmdbd.conf"
+        fi
+        systemctl restart slurmdbd 2>/dev/null && log_info "slurmdbd restarted." || \
+            log_warn "slurmdbd restart failed."
+    fi
+
     # Fix SlurmUser=root → SlurmUser=slurm in existing conf files.
     # slurmdbd validates that its conf is owned by SlurmUser; if SlurmUser=root
     # but the service runs as the slurm OS user the ownership check fails.
@@ -742,6 +768,65 @@ EOF
             log_info "Fixed SlurmUser=root → SlurmUser=slurm in ${_conf}"
         fi
     done
+
+    # Enforce ClusterName and accounting settings in slurm.conf.
+    # A default/pre-existing slurm.conf may have ClusterName=cluster and
+    # AccountingStorageType=accounting_storage/none, causing sbatch to fail
+    # when OOD submits jobs with --cluster=<hpc_cluster_name>.
+    if [[ -f /etc/slurm/slurm.conf ]]; then
+        # Fix ClusterName
+        if ! grep -qE "^ClusterName=${cluster_lc}$" /etc/slurm/slurm.conf; then
+            if grep -qE "^ClusterName=" /etc/slurm/slurm.conf; then
+                sed -i -E "s/^ClusterName=.*$/ClusterName=${cluster_lc}/" /etc/slurm/slurm.conf
+            else
+                echo "ClusterName=${cluster_lc}" >> /etc/slurm/slurm.conf
+            fi
+            log_info "Fixed ClusterName=${cluster_lc} in slurm.conf"
+            # Remove stale state file so slurmctld doesn't fatal on cluster name mismatch
+            rm -f /var/spool/slurm/ctld/clustername
+            log_info "Removed stale clustername state file."
+        fi
+        # Fix AccountingStorageType
+        if ! grep -qE "^AccountingStorageType=accounting_storage/slurmdbd$" /etc/slurm/slurm.conf; then
+            if grep -qE "^AccountingStorageType=" /etc/slurm/slurm.conf; then
+                sed -i -E "s/^AccountingStorageType=.*$/AccountingStorageType=accounting_storage\/slurmdbd/" /etc/slurm/slurm.conf
+            else
+                echo "AccountingStorageType=accounting_storage/slurmdbd" >> /etc/slurm/slurm.conf
+            fi
+            log_info "Fixed AccountingStorageType=accounting_storage/slurmdbd in slurm.conf"
+        fi
+        # Ensure AccountingStorageHost is set
+        if ! grep -qE "^AccountingStorageHost=" /etc/slurm/slurm.conf; then
+            echo "AccountingStorageHost=localhost" >> /etc/slurm/slurm.conf
+            log_info "Added AccountingStorageHost=localhost to slurm.conf"
+        fi
+        # Fix SelectType: select/linear allocates whole nodes exclusively,
+        # preventing multiple jobs from sharing a node's CPUs.
+        # select/cons_tres enables CPU-level resource sharing.
+        if ! grep -qE "^SelectType=select/cons_tres$" /etc/slurm/slurm.conf; then
+            if grep -qE "^SelectType=" /etc/slurm/slurm.conf; then
+                sed -i -E "s/^SelectType=.*$/SelectType=select\/cons_tres/" /etc/slurm/slurm.conf
+            else
+                echo "SelectType=select/cons_tres" >> /etc/slurm/slurm.conf
+            fi
+            log_info "Fixed SelectType=select/cons_tres in slurm.conf"
+        fi
+        if ! grep -qE "^SelectTypeParameters=CR_CPU$" /etc/slurm/slurm.conf; then
+            if grep -qE "^SelectTypeParameters=" /etc/slurm/slurm.conf; then
+                sed -i -E "s/^SelectTypeParameters=.*$/SelectTypeParameters=CR_CPU/" /etc/slurm/slurm.conf
+            else
+                echo "SelectTypeParameters=CR_CPU" >> /etc/slurm/slurm.conf
+            fi
+            log_info "Fixed SelectTypeParameters=CR_CPU in slurm.conf"
+        fi
+        # Remove DefMemPerCPU from partition lines — CR_CPU (no memory tracking)
+        # is used so jobs can consume up to the full node RAM without specifying
+        # memory requirements.
+        if grep -qE "^PartitionName=.*DefMemPerCPU=" /etc/slurm/slurm.conf; then
+            sed -i -E "s/ DefMemPerCPU=[0-9]+//g" /etc/slurm/slurm.conf
+            log_info "Removed DefMemPerCPU from partition definitions in slurm.conf"
+        fi
+    fi
 
     # Fix partition lines that reference Nodes=localhost.
     # slurmctld fatally exits when a partition names a node that does not exist
@@ -892,12 +977,25 @@ EOF
     local oidc_claim; oidc_claim=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk '{print $1}')
     local oidc_regex; oidc_regex=$(echo "${OIDC_REMOTE_USER_CLAIM}" | awk 'NF>1{print $2}')
 
+    # Write ood_portal.yml if it doesn't exist OR if it's the default placeholder
+    # (all settings commented out, no active auth: line).  A placeholder causes
+    # update_ood_portal to use the no-auth.conf.erb template which hardcodes
+    # <VirtualHost *:*> and ignores the port setting entirely.
+    local _write_ood_yml=false
     if [[ ! -f /etc/ood/config/ood_portal.yml ]]; then
+        _write_ood_yml=true
+    elif ! grep -qE "^auth:" /etc/ood/config/ood_portal.yml; then
+        log_info "ood_portal.yml is a placeholder (no auth: configured); overwriting."
+        _write_ood_yml=true
+    fi
+
+    if [[ "$_write_ood_yml" == true ]]; then
         {
             cat <<EOF
 ---
 servername: ${PROXY_FQDN}
 port: ${ONDEMAND_PORT}
+listen_addr_port: ${ONDEMAND_PORT}
 ssl:
   - 'SSLCertificateFile "/etc/pki/tls/certs/ood.crt"'
   - 'SSLCertificateKeyFile "/etc/pki/tls/private/ood.key"'
@@ -908,10 +1006,10 @@ oidc_provider_metadata_url: ${OIDC_PROVIDER_METADATA_URL}
 oidc_client_id: ${OIDC_CLIENT_ID}
 oidc_client_secret: ${OIDC_CLIENT_SECRET}
 oidc_remote_user_claim: ${oidc_claim}
-EOF
-            [[ -n "$oidc_regex" ]] && echo "oidc_remote_user_claim_regex: \"${oidc_regex}\""
-            cat <<EOF
+user_map_match: '^([^@]+)'
 oidc_scope: "${OIDC_SCOPE}"
+EOF
+            cat <<EOF
 dex_uri: false
 auth:
   - 'AuthType openid-connect'
@@ -922,7 +1020,37 @@ EOF
         cp /etc/ood/config/ood_portal.yml /etc/ood/config/ood_portal.yml.tmpl
         log_info "ood_portal.yml written."
     else
-        log_info "ood_portal.yml already exists; skipping."
+        log_info "ood_portal.yml already exists and has auth configured; skipping."
+    fi
+
+    # Always enforce user_map_match in ood_portal.yml.
+    # oidc_remote_user_claim_regex is not a valid OOD option and is silently
+    # ignored; user_map_match is the correct key that strips the @domain suffix
+    # before nginx_stage looks up the user, preventing the username mismatch error.
+    if [[ -f /etc/ood/config/ood_portal.yml ]]; then
+        # Replace the invalid key if present
+        if grep -qE "^oidc_remote_user_claim_regex:" /etc/ood/config/ood_portal.yml; then
+            sed -i "s/^oidc_remote_user_claim_regex:.*$/user_map_match: '^([^@]+)'/" /etc/ood/config/ood_portal.yml
+            log_info "Replaced oidc_remote_user_claim_regex with user_map_match in ood_portal.yml"
+        elif ! grep -qE "^user_map_match:" /etc/ood/config/ood_portal.yml; then
+            sed -i "s/^oidc_remote_user_claim:.*$/&\nuser_map_match: '^([^@]+)'/" /etc/ood/config/ood_portal.yml
+            log_info "Inserted user_map_match into ood_portal.yml"
+        fi
+    fi
+
+    # Always enforce listen_addr_port in ood_portal.yml.
+    # The port: key only sets the VirtualHost binding; listen_addr_port is what
+    # adds the Apache Listen directive so httpd actually opens the port.
+    if [[ -f /etc/ood/config/ood_portal.yml ]]; then
+        if grep -qE "^listen_addr_port:" /etc/ood/config/ood_portal.yml; then
+            if ! grep -qE "^listen_addr_port: ${ONDEMAND_PORT}$" /etc/ood/config/ood_portal.yml; then
+                sed -i -E "s/^listen_addr_port:.*$/listen_addr_port: ${ONDEMAND_PORT}/" /etc/ood/config/ood_portal.yml
+                log_info "Updated listen_addr_port to ${ONDEMAND_PORT} in ood_portal.yml"
+            fi
+        else
+            sed -i "s/^port: /listen_addr_port: ${ONDEMAND_PORT}\nport: /" /etc/ood/config/ood_portal.yml
+            log_info "Inserted listen_addr_port: ${ONDEMAND_PORT} into ood_portal.yml"
+        fi
     fi
 
     # Cluster YAML
@@ -950,9 +1078,19 @@ EOF
         log_info "clusters.d/hpc.yml written."
     fi
 
-    # Regenerate httpd config from ood_portal.yml
-    /opt/ood/ood-portal-generator/sbin/update_ood_portal 2>/dev/null || \
+    # Regenerate httpd config from ood_portal.yml.
+    # Delete the generated Apache conf first so update_ood_portal always
+    # produces a fresh file — otherwise it compares checksums and skips the
+    # write (and the httpd restart) when the stale no-auth placeholder matches.
+    rm -f /etc/httpd/conf.d/ood-portal.conf
+    if /opt/ood/ood-portal-generator/sbin/update_ood_portal 2>/dev/null; then
+        log_info "update_ood_portal completed."
+    else
         log_warn "update_ood_portal failed; httpd config may need manual refresh."
+    fi
+    # Restart httpd to pick up the new port/vhost config.
+    systemctl restart httpd 2>/dev/null && log_info "httpd restarted." || \
+        log_warn "httpd restart failed; check systemctl status httpd."
 
     # Serve xpra HTML5 static files directly from Apache to avoid 502 errors.
     # Xpra's embedded HTTP server can't handle 30+ parallel browser requests;
@@ -964,6 +1102,14 @@ Alias /xpra-html5 /usr/share/xpra/www
     AllowOverride None
     Require all granted
 </Directory>
+EOF
+
+    # Raise Apache header size limits to accommodate large OIDC session cookies.
+    # The default LimitRequestFieldSize of 8190 bytes is too small for mod_auth_openidc
+    # session cookies, causing "Bad Request: request header field exceeds server limit".
+    cat > /etc/httpd/conf.d/ood-limits.conf <<'EOF'
+LimitRequestFieldSize 65536
+LimitRequestLine      65536
 EOF
 
     log_info "Open OnDemand configured."
@@ -1001,11 +1147,27 @@ cache_credentials = true
 krb5_store_password_if_offline = true
 default_shell = /bin/bash
 fallback_homedir = /home/%u
+full_name_format = %1\$s
 EOF
         chmod 600 /etc/sssd/sssd.conf
     else
         log_info "sssd.conf already exists; skipping."
     fi
+
+    # Always enforce full_name_format in sssd.conf.
+    # Without it SSSD returns 'user@domain' and OOD's nginx_stage cannot map
+    # the username, blocking all user sessions.
+    if grep -qE "^full_name_format" /etc/sssd/sssd.conf; then
+        if ! grep -qE "^full_name_format = %1\\\$s" /etc/sssd/sssd.conf; then
+            sed -i -E "s/^full_name_format.*$/full_name_format = %1\$s/" /etc/sssd/sssd.conf
+            log_info "Fixed full_name_format in sssd.conf"
+        fi
+    else
+        echo "full_name_format = %1\$s" >> /etc/sssd/sssd.conf
+        log_info "Added full_name_format = %1\$s to sssd.conf"
+    fi
+    systemctl restart sssd 2>/dev/null && log_info "SSSD restarted." || \
+        log_warn "SSSD restart failed."
 
     systemctl enable --now sssd
     systemctl enable --now oddjobd
@@ -1020,7 +1182,30 @@ setup_xpra() {
     log_step "Configuring Xpra HTML5 client..."
     local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
 
-    mkdir -p /etc/xpra
+    mkdir -p /etc/xpra/html5-client
+
+    # Write default-settings.txt to /etc/xpra/html5-client/ (the conventional
+    # config path) and symlink it into the web root so the browser XHR fetch
+    # of ./default-settings.txt picks it up.
+    cat > /etc/xpra/html5-client/default-settings.txt <<'EOF'
+min-quality = 90
+min-speed = 10
+floating_menu = false
+
+# hide some menus:
+xpramenu=false
+open_windows=true
+fullscreen_button=ture
+keyboard_button=false
+clipboard_button=false
+sound_button=false
+cursor_lock_button=false
+floating_menu=false
+EOF
+    ln -sf /etc/xpra/html5-client/default-settings.txt \
+        /usr/share/xpra/www/default-settings.txt
+    log_info "xpra default-settings.txt written and symlinked."
+
     if [[ ! -f /etc/xpra/xpra.conf ]]; then
         cat > /etc/xpra/xpra.conf <<'EOF'
 # Xpra server defaults for OOD integration
@@ -1031,9 +1216,14 @@ audio = no
 clipboard = yes
 notifications = no
 bell = no
-sharing = no
+sharing = yes
 locks = no
 EOF
+    fi
+    # Always enforce sharing=yes in existing xpra.conf
+    if grep -qE "^sharing = no$" /etc/xpra/xpra.conf 2>/dev/null; then
+        sed -i 's/^sharing = no$/sharing = yes/' /etc/xpra/xpra.conf
+        log_info "Fixed sharing=yes in xpra.conf"
     fi
 
     # OOD Desktop app (Xfce via Xpra)
@@ -1315,7 +1505,7 @@ echo "TIMING - Starting <%= context.app_name %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 
 <% if context.app_name == 'google-chrome' %>
@@ -1351,6 +1541,8 @@ xpra start \
     --webcam=no \
     --system-tray=no \
     --tray=no \
+    --sharing=yes \
+    --input-method=none \
     --resize-display=1920x1080 \
     --dpi=96 \
     --desktop-scaling=off
@@ -1486,7 +1678,7 @@ echo "TIMING - Starting <%= context.terminal_emulator %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 # DLP: determine clipboard and file-transfer permissions from group membership
 id -Gn | grep -qw "dlp_allow_clipboard" && _clip=yes || _clip=no
@@ -1515,6 +1707,8 @@ xpra start \
     --tray=no \
     --clipboard=${_clip} \
     --file-transfer=${_xfer} \
+    --sharing=yes \
+    --input-method=none \
     --resize-display=1920x1080 \
     --dpi=96 \
     --desktop-scaling=off
@@ -1845,6 +2039,40 @@ reconfigure_slurm() {
 }
 
 #-------------------------------------------------------------------------------
+# register_slurm_cluster: ensure the cluster is registered in slurmdbd
+#-------------------------------------------------------------------------------
+register_slurm_cluster() {
+    local cluster_lc; cluster_lc=$(echo "${CLUSTER_NAME}" | tr '[:upper:]' '[:lower:]')
+    log_step "Registering cluster '${cluster_lc}' in Slurm accounting database..."
+
+    if ! systemctl is-active --quiet slurmdbd; then
+        log_warn "slurmdbd is not running; skipping cluster registration."
+        return
+    fi
+
+    # Wait briefly for slurmdbd to be ready
+    local retries=6
+    while (( retries-- > 0 )); do
+        sacctmgr list cluster name="${cluster_lc}" --noheader 2>/dev/null | grep -q "${cluster_lc}" && break
+        sacctmgr list cluster --noheader 2>/dev/null | grep -q "${cluster_lc}" && break
+        sleep 2
+    done
+
+    if sacctmgr list cluster --noheader 2>/dev/null | grep -q "${cluster_lc}"; then
+        log_info "Cluster '${cluster_lc}' already registered in accounting database."
+    else
+        sacctmgr add cluster "${cluster_lc}" -i 2>&1 | \
+            while IFS= read -r line; do log_info "sacctmgr: $line"; done
+        log_info "Cluster '${cluster_lc}' registered."
+    fi
+
+    # Restart slurmctld so it connects to slurmdbd and populates ControlHost/Port.
+    # Without this, sbatch --cluster=<name> fails even though the cluster is registered.
+    systemctl restart slurmctld 2>/dev/null && log_info "slurmctld restarted." || \
+        log_warn "slurmctld restart failed."
+}
+
+#-------------------------------------------------------------------------------
 # start_services: enable and start all core services
 #-------------------------------------------------------------------------------
 start_services() {
@@ -2026,6 +2254,7 @@ cmd_install() {
     update_ood_node_list
 
     start_services
+    register_slurm_cluster
     reconfigure_slurm
 
     echo ""
@@ -2085,6 +2314,16 @@ cmd_cpn_remove() {
 cmd_update() {
     check_root
     load_config
+
+    setup_mariadb
+    configure_slurm
+    configure_ood
+    setup_sssd
+    setup_xpra
+    setup_interactive_apps
+    setup_terminal
+    setup_codeserver
+    register_slurm_cluster
 
     local cluster_conf="${CONF_DIR}/cluster.conf"
     [[ ! -f "$cluster_conf" ]] && die "cluster.conf not found: ${cluster_conf}"
