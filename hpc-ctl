@@ -1653,7 +1653,19 @@ echo "TIMING - Starting <%= context.app_name %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+_ood_db_file="${HOME}/ondemand/data/sys/dashboard/batch_connect/db/<%= session.id %>"
+_mark_session_done() {
+    python3 - "${_ood_db_file}" 2>/dev/null <<'PYEOF'
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f: d = json.load(f)
+    d['cache_completed'] = True
+    d['completed_at'] = int(time.time())
+    with open(sys.argv[1], 'w') as f: json.dump(d, f)
+except: pass
+PYEOF
+}
+trap '_mark_session_done; xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 
 <% if context.app_name == 'google-chrome' %>
@@ -1843,7 +1855,19 @@ echo "TIMING - Starting <%= context.terminal_emulator %> via Xpra at: $(date)"
 cd "${HOME}"
 set -x
 
-trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
+_ood_db_file="${HOME}/ondemand/data/sys/dashboard/batch_connect/db/<%= session.id %>"
+_mark_session_done() {
+    python3 - "${_ood_db_file}" 2>/dev/null <<'PYEOF'
+import json, sys, time
+try:
+    with open(sys.argv[1]) as f: d = json.load(f)
+    d['cache_completed'] = True
+    d['completed_at'] = int(time.time())
+    with open(sys.argv[1], 'w') as f: json.dump(d, f)
+except: pass
+PYEOF
+}
+trap '_mark_session_done; xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
 # DLP: group membership overrides global defaults; falls back to hpc.conf settings
 EOF
