@@ -366,13 +366,12 @@ install_repos() {
     if rpm -q ondemand-release &>/dev/null; then
         print_ok "ondemand-release-${ONDEMAND_VERSION} (already installed)"
     else
+        local _os_major
+        _os_major=$(. /etc/os-release && echo "${VERSION_ID%%.*}")
         # shellcheck disable=SC2086
-        { dnf install -y ${DNF_FLAGS_EXTRA:-} \
-            "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el8.noarch.rpm" \
-            &>>"$LOG_FILE" || \
-          dnf install -y ${DNF_FLAGS_EXTRA:-} \
-            "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el9.noarch.rpm" \
-            &>>"$LOG_FILE"; } \
+        yes | dnf install -y ${DNF_FLAGS_EXTRA:-} \
+            "https://yum.osc.edu/ondemand/${ONDEMAND_VERSION}/ondemand-release-web-${ONDEMAND_VERSION}-1.el${_os_major}.noarch.rpm" \
+            &>>"$LOG_FILE" \
             && print_ok "ondemand-release-${ONDEMAND_VERSION}" || print_warn "ondemand-release-${ONDEMAND_VERSION}"
     fi
     
