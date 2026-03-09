@@ -114,6 +114,8 @@ load_config() {
     IPA_GROUP_BASE="${IPA_GROUP_BASE:-cn=groups,cn=accounts,${IPA_BASE_DN}}"
     IPA_HPC_GROUP="${IPA_HPC_GROUP:-hpc-users}"
     MARIADB_SLURM_PASS="${MARIADB_SLURM_PASS:-}"
+    CLIPBOARD="${CLIPBOARD:-disabled}"
+    FILE="${FILE:-upload}"
 
     log_info "Config loaded from: $conf_file"
 }
@@ -164,6 +166,20 @@ OIDC_SCOPE="openid profile email"
 
 # MariaDB password for Slurm accounting DB (auto-generated if left blank)
 MARIADB_SLURM_PASS=
+
+# Global configuration
+# Set clipboard share option:
+#  - disabled (default), no clipboard share
+#  - copy, allow both copy and paste from/to server
+#  - paste, allow paste only to server
+CLIPBOARD=disabled
+
+# File operations
+# Enable file upload and download
+#   - upload, upload enabled only (default)
+#   - download, enable download and upload
+#   - disabled, disable both upload and download
+FILE=upload
 EOF
         echo "[INFO]  Created example: ${CONF_DIR}/hpc.conf"
     fi
@@ -983,9 +999,18 @@ OOD_DEFAULT_SSHHOST=${server_hostname}
 OOD_SSHHOST_ALLOWLIST=${server_hostname}
 EOF
 
-    # Dashboard app: remove completed session cards immediately (default is 7 days)
+    # Dashboard app env: global file-permission defaults (per-user passenger_env_var
+    # set by the pun pre-hook takes precedence; these are the dotenv fallbacks)
+    local _ood_download _ood_upload
+    case "${FILE:-upload}" in
+        download) _ood_download=true  ; _ood_upload=true  ;;
+        disabled) _ood_download=false ; _ood_upload=false ;;
+        *)        _ood_download=false ; _ood_upload=true  ;;  # upload only (default)
+    esac
     cat > /etc/ood/config/apps/dashboard/env <<EOF
 OOD_BC_CARD_TIME=0
+OOD_DOWNLOAD_ENABLED=${_ood_download}
+OOD_UPLOAD_ENABLED=${_ood_upload}
 EOF
 
     # Parse OIDC claim and optional regex
@@ -1075,8 +1100,6 @@ EOF
 v2:
   metadata:
     title: "${CLUSTER_NAME}"
-  login:
-    host: "${server_fqdn}"
   job:
     adapter: "slurm"
     cluster: "${cluster_lc}"
@@ -1188,6 +1211,92 @@ EOF
     systemctl enable --now oddjobd
     authselect select sssd with-mkhomedir --force 2>/dev/null || true
     log_info "SSSD configured."
+}
+
+#-------------------------------------------------------------------------------
+# setup_pun_file_hook: per-user OOD file download/upload control
+#
+# Mechanism:
+#   1. A custom pun.conf.erb template adds:
+#        include /etc/ood/pun_env/<user>.conf;
+#      inside the nginx http block, which sets passenger_env_var for that user.
+#   2. A root pre-hook script (run by nginx_stage before each user PUN starts)
+#      writes the per-user .conf file based on group membership and hpc.conf FILE.
+#   3. /etc/ood/config/apps/dashboard/env (written by configure_ood) provides
+#      the dotenv fallback; dotenv load does NOT overwrite passenger_env_var values.
+#-------------------------------------------------------------------------------
+setup_pun_file_hook() {
+    log_step "Configuring per-user OOD file permission hook..."
+
+    # Translate FILE global config to per-user defaults
+    local _download_default _upload_default
+    case "${FILE:-upload}" in
+        download) _download_default=true  ; _upload_default=true  ;;
+        disabled) _download_default=false ; _upload_default=false ;;
+        *)        _download_default=false ; _upload_default=true  ;;
+    esac
+
+    # --- Pre-hook script --------------------------------------------------
+    mkdir -p /etc/ood/hooks /etc/ood/pun_env
+    cat > /etc/ood/hooks/pun_pre_hook.sh <<EOF
+#!/bin/bash
+# OOD PUN pre-hook: sets per-user file download/upload permissions.
+# Called by nginx_stage as root with: --user <username>
+username=""
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in --user) username="\$2"; shift 2 ;; *) shift ;; esac
+done
+[[ -z "\$username" ]] && exit 0
+
+mkdir -p /etc/ood/pun_env
+
+# Group membership overrides global defaults from hpc.conf
+if id -Gn "\$username" 2>/dev/null | grep -qw "dlp_allow_download"; then
+    _download=true
+    _upload=true
+else
+    _download=${_download_default}
+    _upload=${_upload_default}
+fi
+
+cat > /etc/ood/pun_env/\${username}.conf <<CONFEOF
+passenger_env_var OOD_DOWNLOAD_ENABLED \${_download};
+passenger_env_var OOD_UPLOAD_ENABLED \${_upload};
+CONFEOF
+chmod 600 /etc/ood/pun_env/\${username}.conf
+EOF
+    chmod 755 /etc/ood/hooks/pun_pre_hook.sh
+    log_info "Pre-hook script written: /etc/ood/hooks/pun_pre_hook.sh"
+
+    # --- Custom PUN nginx template ----------------------------------------
+    # Copy the stock templates; patch only pun.conf.erb to include the
+    # per-user passenger_env_var file inside the nginx http block.
+    mkdir -p /etc/ood/nginx_stage/templates
+    cp /opt/ood/nginx_stage/templates/app.conf.erb \
+       /etc/ood/nginx_stage/templates/app.conf.erb
+    # Inject include directive right after the passenger_load_shell_envvars line
+    sed '/passenger_load_shell_envvars off;/a\  <%- _uenv = "/etc/ood/pun_env/#{user}.conf" -%>\n  <%- if File.exist?(_uenv) -%>\n  include <%= _uenv %>;\n  <%- end -%>' \
+        /opt/ood/nginx_stage/templates/pun.conf.erb \
+        > /etc/ood/nginx_stage/templates/pun.conf.erb
+    log_info "Custom pun.conf.erb written."
+
+    # --- nginx_stage.yml --------------------------------------------------
+    local ns_yml=/etc/ood/config/nginx_stage.yml
+    # Set pun_pre_hook_root_cmd
+    if grep -qE "^pun_pre_hook_root_cmd:" "$ns_yml" 2>/dev/null; then
+        sed -i -E "s|^pun_pre_hook_root_cmd:.*|pun_pre_hook_root_cmd: /etc/ood/hooks/pun_pre_hook.sh|" "$ns_yml"
+    else
+        echo "pun_pre_hook_root_cmd: /etc/ood/hooks/pun_pre_hook.sh" >> "$ns_yml"
+    fi
+    # Set template_root
+    if grep -qE "^template_root:" "$ns_yml" 2>/dev/null; then
+        sed -i -E "s|^template_root:.*|template_root: /etc/ood/nginx_stage/templates|" "$ns_yml"
+    else
+        echo "template_root: /etc/ood/nginx_stage/templates" >> "$ns_yml"
+    fi
+    log_info "nginx_stage.yml updated."
+
+    log_info "Per-user OOD file hook configured (default: download=${_download_default}, upload=${_upload_default})."
 }
 
 #-------------------------------------------------------------------------------
@@ -1513,6 +1622,18 @@ with open(sys.argv[1], 'w') as f: json.dump(d, f)
 fi
 EOF
 
+    # Translate global config to xpra values for apps (no group-level overrides)
+    local _xpra_clip_default _xpra_xfer_default
+    case "${CLIPBOARD:-disabled}" in
+        copy)  _xpra_clip_default=yes ;;
+        paste) _xpra_clip_default=to-server ;;
+        *)     _xpra_clip_default=no ;;
+    esac
+    case "${FILE:-upload}" in
+        download) _xpra_xfer_default=yes ;;
+        *)        _xpra_xfer_default=no ;;
+    esac
+
     cat > "${unified_dir}/template/script.sh.erb" <<'EOF'
 #!/usr/bin/env bash
 
@@ -1556,6 +1677,11 @@ xpra start \
     --webcam=no \
     --system-tray=no \
     --tray=no \
+EOF
+    # Use printf to avoid bash's \<newline> line-continuation in unquoted heredocs
+    printf '    --clipboard=%s \\\n    --file-transfer=%s \\\n' \
+        "${_xpra_clip_default}" "${_xpra_xfer_default}" >> "${unified_dir}/template/script.sh.erb"
+    cat >> "${unified_dir}/template/script.sh.erb" <<'EOF'
     --sharing=yes \
     --input-method=none \
     --resize-display=1920x1080 \
@@ -1686,6 +1812,18 @@ with open(sys.argv[1], 'w') as f: json.dump(d, f)
 fi
 EOF
 
+    # Translate global config to xpra values (used as defaults when not in DLP groups)
+    local _xpra_clip_default _xpra_xfer_default
+    case "${CLIPBOARD:-disabled}" in
+        copy)  _xpra_clip_default=yes ;;
+        paste) _xpra_clip_default=to-server ;;
+        *)     _xpra_clip_default=no ;;
+    esac
+    case "${FILE:-upload}" in
+        download) _xpra_xfer_default=yes ;;
+        *)        _xpra_xfer_default=no ;;
+    esac
+
     cat > "${dir}/template/script.sh.erb" <<'EOF'
 #!/usr/bin/env bash
 
@@ -1695,9 +1833,21 @@ set -x
 
 trap 'xpra stop "ws:localhost:${port}" 2>/dev/null; sleep 2; pkill -u "${USER}" -f "xpra.*${port}" 2>/dev/null; pkill -u "${USER}" -f "wmctrl.*maximized" 2>/dev/null; rm -rf "${_xpra_tmp}"' EXIT
 
-# DLP: determine clipboard and file-transfer permissions from group membership
-id -Gn | grep -qw "dlp_allow_clipboard" && _clip=yes || _clip=no
-id -Gn | grep -qw "dlp_allow_download"  && _xfer=yes || _xfer=no
+# DLP: group membership overrides global defaults; falls back to hpc.conf settings
+EOF
+    cat >> "${dir}/template/script.sh.erb" <<EOF
+if id -Gn | grep -qw "dlp_allow_clipboard"; then
+    _clip=yes
+else
+    _clip=${_xpra_clip_default}
+fi
+if id -Gn | grep -qw "dlp_allow_download"; then
+    _xfer=yes
+else
+    _xfer=${_xpra_xfer_default}
+fi
+EOF
+    cat >> "${dir}/template/script.sh.erb" <<'EOF'
 
 <% if context.terminal_emulator == 'gnome-terminal' %>
 export _term_cmd="dbus-launch gnome-terminal --wait"
@@ -2275,6 +2425,7 @@ cmd_install() {
     setup_ssl
     configure_ood
     setup_sssd
+    setup_pun_file_hook
     setup_xpra
     setup_interactive_apps
     setup_terminal
@@ -2364,6 +2515,7 @@ cmd_update() {
     configure_slurm
     configure_ood
     setup_sssd
+    setup_pun_file_hook
     setup_xpra
     setup_interactive_apps
     setup_terminal
