@@ -1,0 +1,45 @@
+# ldap.conf — OpenLDAP client configuration for FreeIPA
+# Copy to /etc/openldap/ldap.conf inside the container (or mount it).
+# Reference: man ldap.conf(5)
+#
+# Fields marked CHANGE_ME must be updated before use.
+# -------------------------------------------------------
+
+# ---- Server URI ----
+# Use ldaps:// (port 636) in production for encrypted transport.
+# Multiple URIs can be space-separated.
+URI     ldaps://ipa.CHANGE_ME.com
+
+# ---- Base DN ----
+# Derive from your FreeIPA realm, e.g. realm EXAMPLE.COM → dc=example,dc=com
+BASE    dc=CHANGE_ME,dc=com
+
+# ---- TLS ----
+# Path to the IPA CA certificate.
+# After enrolling with ipa-client-install it is placed at /etc/ipa/ca.crt.
+TLS_CACERT   /etc/ipa/ca.crt
+
+# Require server cert verification (demand | never | allow)
+# Use "demand" in production; "never" only for troubleshooting.
+TLS_REQCERT  demand
+
+# ---- Optional: LDAP version (must be 3 for IPA) ----
+LDAP_VERSION 3
+
+# ---- Optional: referral chasing ----
+REFERRALS    off
+
+# ---- Optional: timeout settings ----
+NETWORK_TIMEOUT 10
+TIMEOUT         30
+
+# -------------------------------------------------------
+# Notes for FreeIPA environments
+# -------------------------------------------------------
+# 1. Users live under:  uid=<user>,cn=users,cn=accounts,dc=CHANGE_ME,dc=com
+# 2. Groups live under: cn=<group>,cn=groups,cn=accounts,dc=CHANGE_ME,dc=com
+# 3. SSSD (sssd.conf) handles authentication; this file is used only by
+#    low-level ldapsearch / nslcd commands.
+# 4. If the IPA CA cert is not yet on the host, retrieve it with:
+#      ipa-getcert list
+#    or copy /etc/ipa/ca.crt from a joined client.

@@ -1,0 +1,20 @@
+# ipa.conf.sample — IPA environment variables for sync-slurm-ipa.sh
+# Copy to ipa.conf and fill in your site values.
+# Used as a Docker Compose env_file: variables are injected into the
+# container environment at startup.
+# After editing, recreate the container to apply changes:
+#   docker compose up -d --force-recreate slurmctld
+
+# IPA group whose members should be synced into Slurm
+IPA_HPC_GROUP=hpc-users
+
+# IPA / LDAP connection details
+IPA_SERVER=ipa.example.com
+IPA_DOMAIN=example.com
+IPA_BASE_DN=dc=example,dc=com
+IPA_USER_BASE=cn=users,cn=accounts,dc=example,dc=com
+IPA_GROUP_BASE=cn=groups,cn=accounts,dc=example,dc=com
+
+# Service account for LDAP bind (create in IPA under System Accounts)
+IPA_BIND_DN=uid=ldapauth,cn=sysaccounts,cn=etc,dc=example,dc=com
+IPA_BIND_PASSWORD=CHANGE_ME

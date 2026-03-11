@@ -1,0 +1,120 @@
+# docker-compose.yml — Slurm controller + accounting daemon + external MariaDB
+#
+# Prerequisites:
+#   1. Run ./build.sh to build the image and generate munge/munge.key
+#   2. Edit .env with your passwords
+#   3. Edit slurm/conf/sssd.conf with your FreeIPA details
+#   4. Place the FreeIPA CA cert at ipa/ca.crt (or remove the mount)
+#   5. Edit conf/ipa/ipa.conf with your IPA bind credentials
+#      Then recreate the container: docker compose up -d --force-recreate slurmctld
+#
+# Start:     cd docker && docker compose up -d
+# Stop:      docker compose down
+# Logs:      docker compose logs -f slurmctld
+
+# ---------------------------------------------------------------------------
+# Shared named volumes
+# ---------------------------------------------------------------------------
+volumes:
+  slurm_spool:
+  slurm_log:
+  mariadb_data:
+
+# ---------------------------------------------------------------------------
+# Network
+# ---------------------------------------------------------------------------
+networks:
+  hpc:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # ── External MariaDB (slurm_acct_db) ──────────────────────────────────────
+  mariadb:
+    image: mariadb:10.11
+    container_name: mariadb
+    hostname: mariadb
+    restart: unless-stopped
+    networks:
+      - hpc
+    environment:
+      MYSQL_ROOT_PASSWORD:     ${MARIADB_ROOT_PASSWORD:-CHANGE_ROOT_PASS}
+      MYSQL_DATABASE:          slurm_acct_db
+      MYSQL_USER:              slurm
+      MYSQL_PASSWORD:          ${MARIADB_SLURM_PASSWORD:-CHANGE_ME_SLURM_DB_PASS}
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./mariadb/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:3306:3306"   # expose only to localhost for safety
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--su-mysql", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Slurm controller + database daemon ────────────────────────────────────
+  slurmctld:
+    image: slurm-ctld:latest       # built by build.sh
+    container_name: slurmctld
+    hostname: slurmctld
+    restart: unless-stopped
+    networks:
+      - hpc
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    ports:
+      - "6817:6817"   # slurmctld
+      - "6819:6819"   # slurmdbd
+    volumes:
+      # Munge key — shared with all compute nodes
+      - ./munge/munge.key:/etc/munge/munge.key:ro
+      # Slurm / supervisor config — can be edited on host without rebuild
+      - ./slurm/conf/slurm.conf:/etc/slurm/slurm.conf:ro
+      - ./slurm/conf/slurmdbd.conf:/etc/slurm/slurmdbd.conf:ro
+      - ./slurm/conf/cgroup.conf:/etc/slurm/cgroup.conf:ro
+      - ./slurm/conf/supervisord.conf:/etc/supervisord.conf:ro
+      # SSSD / FreeIPA
+      - ./slurm/conf/sssd.conf:/etc/sssd/sssd.conf:ro
+      - ./ipa/ca.crt:/etc/ipa/ca.crt:ro          # remove if not using IPA TLS
+      # Persistent state
+      - slurm_spool:/var/spool/slurm
+      - slurm_log:/var/log/slurm
+    env_file:
+      - ./ipa/ipa.conf               # IPA sync vars (IPA_SERVER, IPA_BIND_DN, etc.)
+    environment:
+      # Passed through to entrypoint for convenience; actual values come from
+      # slurmdbd.conf — these are informational only.
+      MARIADB_HOST: mariadb
+      MARIADB_PORT: "3306"
+    # Allow sssd to manage /proc/self/attr (needed for SELinux-aware SSSD)
+    security_opt:
+      - no-new-privileges:true
+    cap_add:
+      - SYS_ADMIN          # required by cgroup v2 + sssd
+    # Uncomment to join the same host network as compute nodes:
+    # network_mode: host
+
+  # ── Compute node example (slurmd) ─────────────────────────────────────────
+  # Uncomment and customise as needed.
+  #
+  # cpn01:
+  #   image: slurm-compute:latest  # separate compute image
+  #   container_name: cpn01
+  #   hostname: cpn01
+  #   restart: unless-stopped
+  #   networks:
+  #     - hpc
+  #   depends_on:
+  #     - slurmctld
+  #   volumes:
+  #     - ./munge/munge.key:/etc/munge/munge.key:ro
+  #     - ./slurm/conf/slurm.conf:/etc/slurm/slurm.conf:ro
+  #     - slurm_spool:/var/spool/slurm
+  #   cap_add:
+  #     - SYS_ADMIN
+  #   init: true

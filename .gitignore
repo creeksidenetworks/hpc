@@ -1,23 +1,41 @@
-# Submodule / referenced repos
-hpc-on-docker/
+# =============================================================================
+# Secrets and credentials — never commit these
+# =============================================================================
 
-# Documentation
-instruction.md
+# MariaDB passwords
+docker/.env
 
-# Sensitive config (contains credentials)
-conf/hpc.conf
+# IPA bind credentials (use ipa.conf.sample as reference)
+docker/ipa/ipa.conf
 
+# Munge shared secret
+docker/munge/
+
+# Slurmdbd DB password (StoragePass)
+docker/slurm/conf/slurmdbd.conf
+
+# FreeIPA CA certificate (site-specific, fetch from IPA server)
+docker/ipa/ca.crt
+
+# =============================================================================
 # Generated / runtime files
+# =============================================================================
 *.log
 *.pid
-*.key
-*.crt
+*.out
 
-# Editor / OS
+# =============================================================================
+# Legacy / local paths (pre-existing)
+# =============================================================================
+hpc-on-docker/
+instruction.md
+conf/hpc.conf
+
+# =============================================================================
+# Editor and OS noise
+# =============================================================================
 .DS_Store
 *.swp
 *.swo
 *~
 .claude/
-*.conf
-*.out
