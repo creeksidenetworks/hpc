@@ -1,0 +1,43 @@
+# ood_portal_local.yml — Open OnDemand PAM/IPA portal (direct VPN access)
+# Reference: https://osc.github.io/ood-documentation/latest/reference/files/ood-portal-yml.html
+#
+# Deployment path: VPN user ──HTTPS 443──► this container
+#   - SSL is handled by OOD itself
+#   - Auth: HTTP Basic → mod_authnz_pam → SSSD → FreeIPA
+#   - No OIDC provider needed
+#
+# No secrets in this file — safe to commit to version control.
+#
+# To apply changes without a full restart:
+#   docker exec ondemand /opt/ood/ood-portal-generator/bin/generate \
+#     --config /etc/ood/config/ood_portal_local.yml \
+#     --output /etc/httpd/conf.d/ood-portal-local.conf
+#   docker exec ondemand supervisorctl restart httpd
+
+# ---------- Server identity ----------
+# Set to the hostname users on VPN type in their browser.
+servername: hpc-mac.csn.corp
+port: 443
+
+ssl:
+  - SSLCertificateFile /etc/pki/tls/certs/ondemand.crt
+  - SSLCertificateKeyFile /etc/pki/tls/private/ondemand.key
+
+# ---------- Authentication: Basic/PAM → SSSD → FreeIPA ----------
+auth:
+  - "AuthType Basic"
+  - "AuthName \"Open OnDemand — Local IPA Login\""
+  - "AuthBasicProvider PAM"
+  - "AuthPAMService ood"
+  - "Require valid-user"
+
+# ---------- OOD URIs ----------
+node_uri: /node
+rnode_uri: /rnode
+
+# ---------- Logging ----------
+logroot: /var/log/ondemand
+
+# ---------- User mapping ----------
+user_map_cmd: /opt/ood/ood_auth_map/bin/ood_auth_map.regex
+user_map_match: "^(.+)$"

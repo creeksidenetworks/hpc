@@ -14,6 +14,9 @@ docker/munge/
 # Slurmdbd DB password (StoragePass)
 docker/slurm/conf/slurmdbd.conf
 
+# OOD portal config — contains OIDC client secret (use ood_portal.yml.sample)
+docker/ondemand/conf/ood_portal.yml
+
 # FreeIPA CA certificate (site-specific, fetch from IPA server)
 docker/ipa/ca.crt
 

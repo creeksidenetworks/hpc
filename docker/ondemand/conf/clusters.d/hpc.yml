@@ -1,0 +1,27 @@
+# clusters.d/hpc.yml — Slurm cluster definition for Open OnDemand
+# Reference: https://osc.github.io/ood-documentation/latest/installation/resource-manager/slurm.html
+
+v2:
+  metadata:
+    title: "HPC"
+
+  # SSH login host for the OOD Shell app
+  # The slurmctld container must have sshd running for shell access.
+  login:
+    host: slurmctld
+
+  job:
+    adapter: slurm
+    # Path to Slurm client binaries inside the OOD container
+    bin: /usr/bin
+    # slurm.conf mounted from host — must match the controller's config
+    conf: /etc/slurm/slurm.conf
+    # Submit jobs from within the OOD container (no separate submit host)
+    submit_host: ~
+
+  # Restrict access to members of the IPA HPC group
+  # Remove or adjust acls to allow all authenticated users
+  acls:
+    - adapter: group
+      groups:
+        - hpc-users

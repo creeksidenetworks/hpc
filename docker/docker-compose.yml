@@ -1,16 +1,18 @@
-# docker-compose.yml — Slurm controller + accounting daemon + external MariaDB
+# docker-compose.yml — HPC stack: MariaDB, Slurm controller, Open OnDemand
 #
 # Prerequisites:
-#   1. Run ./build.sh to build the image and generate munge/munge.key
-#   2. Edit .env with your passwords
-#   3. Edit slurm/conf/sssd.conf with your FreeIPA details
-#   4. Place the FreeIPA CA cert at ipa/ca.crt (or remove the mount)
-#   5. Edit conf/ipa/ipa.conf with your IPA bind credentials
-#      Then recreate the container: docker compose up -d --force-recreate slurmctld
+#   1. Run ./build.sh to build images and generate munge/munge.key
+#   2. Edit .env with DB passwords
+#   3. Edit slurm/conf/sssd.conf and ondemand/conf/sssd.conf with IPA details
+#   4. Place the FreeIPA CA cert at ipa/ca.crt
+#   5. Edit ipa/ipa.conf with IPA bind credentials
+#   6. Copy ondemand/conf/ood_portal.yml.sample → ood_portal.yml, fill in OIDC values
+#   7. Edit ondemand/conf/ood_portal_local.yml — set servername
 #
 # Start:     cd docker && docker compose up -d
 # Stop:      docker compose down
 # Logs:      docker compose logs -f slurmctld
+#            docker compose logs -f ondemand
 
 # ---------------------------------------------------------------------------
 # Shared named volumes
@@ -98,6 +100,41 @@ services:
       - SYS_ADMIN          # required by cgroup v2 + sssd
     # Uncomment to join the same host network as compute nodes:
     # network_mode: host
+
+  # ── Open OnDemand web portal ──────────────────────────────────────────────
+  ondemand:
+    image: ondemand:latest            # built by build.sh -i ondemand
+    container_name: ondemand
+    hostname: ondemand
+    restart: unless-stopped
+    networks:
+      - hpc
+    depends_on:
+      - slurmctld
+    ports:
+      - "80:80"                       # HTTP → redirects to 443
+      - "443:443"                     # PAM/IPA auth — direct VPN access
+      - "8080:8080"                   # OIDC auth — external reverse proxy target
+    volumes:
+      # Munge key — shared with slurmctld for job submission auth
+      - ./munge/munge.key:/etc/munge/munge.key:ro
+      # Slurm client config — must match slurmctld version
+      - ./slurm/conf/slurm.conf:/etc/slurm/slurm.conf:ro
+      # OOD portal configs (editable on host)
+      - ./ondemand/conf/ood_portal.yml:/etc/ood/config/ood_portal.yml:ro
+      - ./ondemand/conf/ood_portal_local.yml:/etc/ood/config/ood_portal_local.yml:ro
+      - ./ondemand/conf/clusters.d:/etc/ood/config/clusters.d:ro
+      - ./ondemand/conf/supervisord.conf:/etc/supervisord.conf:ro
+      # SSSD / FreeIPA
+      - ./ondemand/conf/sssd.conf:/etc/sssd/sssd.conf:ro
+      - ./ipa/ca.crt:/etc/ipa/ca.crt:ro
+      # Interactive apps and widgets — live editable, no restart needed
+      - ./ondemand/apps:/var/www/ood/apps/sys
+      - ./ondemand/public:/var/www/ood/public
+    cap_add:
+      - SYS_ADMIN       # required by sssd and OOD per-user nginx spawning
+      - SETUID
+      - SETGID
 
   # ── Compute node example (slurmd) ─────────────────────────────────────────
   # Uncomment and customise as needed.

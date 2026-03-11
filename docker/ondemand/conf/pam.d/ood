@@ -1,0 +1,6 @@
+# /etc/pam.d/ood — PAM configuration for Open OnDemand local auth
+# Used by mod_authnz_pam to authenticate local IPA users via SSSD.
+# File must be owned by root and readable only by root (mode 0600).
+
+auth     include  password-auth
+account  include  password-auth

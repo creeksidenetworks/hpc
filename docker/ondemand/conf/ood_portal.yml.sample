@@ -1,0 +1,67 @@
+# ood_portal.yml — Open OnDemand OIDC portal (external reverse proxy path)
+# Reference: https://osc.github.io/ood-documentation/latest/reference/files/ood-portal-yml.html
+#
+# Copy to ood_portal.yml and fill in CHANGE_ME values.
+# ood_portal.yml is gitignored — it contains the OIDC client secret.
+#
+# Deployment path: external nginx/proxy ──HTTP 8080──► this container
+#   - SSL is terminated at the proxy; OOD runs plain HTTP on port 8080
+#   - Users hit the proxy's public FQDN; set servername to match
+#   - Register https://<servername>/oidc as the redirect URI in your OIDC provider
+#
+# For direct VPN access with PAM/IPA auth, see ood_portal_local.yml (port 443).
+#
+# To apply changes without a full restart:
+#   docker exec ondemand /opt/ood/ood-portal-generator/bin/generate \
+#     --config /etc/ood/config/ood_portal.yml \
+#     --output /etc/httpd/conf.d/ood-portal.conf
+#   docker exec ondemand supervisorctl restart httpd
+
+# ---------- Server identity ----------
+# Set to the public FQDN users type in their browser (the proxy's hostname).
+servername: ondemand.CHANGE_ME.com
+
+# Port the proxy forwards to (plain HTTP — no SSL on this side).
+port: 8080
+
+# ssl: intentionally omitted — SSL is terminated at the external proxy.
+
+# ---------- Trusted proxy ----------
+# OOD will trust X-Forwarded-* headers only from these addresses.
+# Set to the IP(s) or CIDR(s) of your nginx proxy.
+trusted_proxies:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+
+# ---------- OIDC (external SSO) ----------
+# Redirect URI registered with your provider:
+#   https://ondemand.CHANGE_ME.com/oidc
+oidc_uri: /oidc
+oidc_provider_metadata_url: https://sso.CHANGE_ME.com/.well-known/openid-configuration
+oidc_client_id: ondemand
+oidc_client_secret: CHANGE_ME_OIDC_SECRET
+
+# Claim that maps to the Unix username (must match IPA uid)
+oidc_remote_user_claim: preferred_username
+
+oidc_scope: "openid profile email"
+oidc_session_inactivity_timeout: 28800   # 8 hours
+oidc_session_max_duration: 28800
+oidc_cookie_same_site: "On"
+
+# ---------- Authentication ----------
+auth:
+  - "AuthType openid-connect"
+  - "Require valid-user"
+
+# ---------- OOD URIs ----------
+node_uri: /node
+rnode_uri: /rnode
+
+# ---------- Logging ----------
+logroot: /var/log/ondemand
+
+# ---------- User mapping ----------
+user_map_cmd: /opt/ood/ood_auth_map/bin/ood_auth_map.regex
+user_map_match: "^(.+)$"
