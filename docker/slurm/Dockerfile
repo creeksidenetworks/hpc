@@ -87,9 +87,6 @@ RUN curl -fsSL \
         2>&1 | tail -20 && \
     make -j"$(nproc)" && \
     make install && \
-    install -D -m 0644 etc/cgroup.conf.example     /etc/slurm/cgroup.conf && \
-    install -D -m 0644 etc/slurm.conf.example      /etc/slurm/slurm.conf && \
-    install -D -m 0600 etc/slurmdbd.conf.example   /etc/slurm/slurmdbd.conf && \
     cd / && rm -rf /tmp/slurm-build
 
 # --------------------------------------------------------------------------
