@@ -115,7 +115,35 @@ fi
 [[ -f "$CONTEXT_DIR/Dockerfile" ]] || \
     die "Dockerfile not found at $CONTEXT_DIR/Dockerfile"
 
-for cfg in slurm.conf slurmdbd.conf cgroup.conf sssd.conf supervisord.conf; do
+if [[ ! -f "$CONTEXT_DIR/conf/$slurmdbd.conf" ]]; then
+    cat <<EOF > "$CONTEXT_DIR/conf/$slurmdbd.conf"
+# slurmdbd.conf — Slurm Database Daemon configuration
+# Reference: https://slurm.schedmd.com/slurmdbd.conf.html
+# File must be owned by slurm, mode 0600
+
+# ----- Authentication -----
+AuthType=auth/munge
+
+# ----- Daemon -----
+DbdHost=slurmctld
+DbdPort=6819
+SlurmUser=slurm
+DebugLevel=info
+LogFile=/var/log/slurm/slurmdbd.log
+PidFile=/var/run/slurmdbd/slurmdbd.pid
+
+# ----- Database (external MariaDB container) -----
+StorageType=accounting_storage/mysql
+StorageHost=mariadb          # hostname of the external MariaDB container
+StoragePort=3306
+StorageUser=slurm
+StoragePass=UbHGnYGid10HMHvIotB05jWpNsnuTgSC
+StorageLoc=slurm_acct_db
+EOF
+
+fi
+
+for cfg in slurm.conf cgroup.conf sssd.conf supervisord.conf; do
     [[ -f "$CONTEXT_DIR/conf/$cfg" ]] || \
         die "Missing required config: $CONTEXT_DIR/conf/$cfg"
 done
