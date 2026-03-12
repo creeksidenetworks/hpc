@@ -63,5 +63,6 @@ rnode_uri: /rnode
 logroot: /var/log/ondemand
 
 # ---------- User mapping ----------
-user_map_cmd: /opt/ood/ood_auth_map/bin/ood_auth_map.regex
-user_map_match: "^(.+)$"
+# No user_map_cmd — OOD uses the OIDC claim (preferred_username) directly
+# as the system username. If your provider returns user@domain.com, add:
+#   user_map_match: "^([^@]+)@.+$"
