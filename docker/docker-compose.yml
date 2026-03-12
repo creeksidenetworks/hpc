@@ -128,9 +128,10 @@ services:
       - ./ondemand/conf/ood_portal_local.yml:/etc/ood/config/ood_portal_local.yml:ro
       - ./ondemand/conf/clusters.d:/etc/ood/config/clusters.d:ro
       - ./ondemand/conf/supervisord.conf:/etc/supervisord.conf:ro
-      # SSSD / FreeIPA / PAM
+      # SSSD / FreeIPA / PAM / provisioning
       - ./ondemand/conf/sssd.conf:/etc/sssd/sssd.conf:ro
       - ./ondemand/conf/pam.d/ood:/etc/pam.d/ood:ro
+      - ./ondemand/scripts/ood-pun-setup.sh:/usr/local/bin/ood-pun-setup.sh:ro
       - ./ipa/ca.crt:/etc/ipa/ca.crt:ro
       # Interactive apps — seeded from image on first start, live editable thereafter
       - ./ondemand/apps:/var/www/ood/apps/sys

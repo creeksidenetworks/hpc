@@ -102,11 +102,13 @@ COPY conf/clusters.d/              /etc/ood/config/clusters.d/
 COPY conf/sssd.conf                /etc/sssd/sssd.conf
 COPY conf/supervisord.conf         /etc/supervisord.conf
 COPY conf/pam.d/ood                /etc/pam.d/ood
+COPY scripts/ood-pun-setup.sh      /usr/local/bin/ood-pun-setup.sh
 COPY entrypoint.sh                 /usr/local/bin/entrypoint.sh
 
 RUN chmod 600 /etc/sssd/sssd.conf \
               /etc/pam.d/ood && \
-    chmod +x /usr/local/bin/entrypoint.sh && \
+    chmod +x /usr/local/bin/entrypoint.sh \
+             /usr/local/bin/ood-pun-setup.sh && \
     # Enable mod_authnz_pam (disabled by default on Rocky 8)
     sed -i 's|^#.*LoadModule authnz_pam_module|LoadModule authnz_pam_module|' \
         /etc/httpd/conf.modules.d/55-authnz_pam.conf && \
@@ -117,28 +119,18 @@ RUN chmod 600 /etc/sssd/sssd.conf \
     # Port 8080 — HTTP,  OIDC auth,   external reverse proxy access
     printf 'Listen 443 https\nListen 8080\n' \
         > /etc/httpd/conf.d/ood-listen.conf && \
-    # Wrap nginx_stage to auto-create home directories before the PUN starts.
-    # nginx_stage runs as root, so it can create directories for any user.
-    # The real binary is renamed; the wrapper creates the home dir then delegates.
+    # Wrap nginx_stage to run per-user provisioning before the PUN starts.
+    # nginx_stage runs as root — the wrapper extracts --user and delegates
+    # all provisioning (home dir, SSH keys, Slurm account) to ood-pun-setup.sh.
     mv /opt/ood/nginx_stage/sbin/nginx_stage \
        /opt/ood/nginx_stage/sbin/nginx_stage.real && \
     printf '%s\n' \
         '#!/bin/bash' \
-        '# Auto-create home directory before starting the per-user nginx (PUN).' \
         'for i in "$@"; do' \
         '  [[ "$_prev" == "--user" ]] && _user="$i"; _prev="$i"' \
         'done' \
-        'if [[ -n "$_user" ]]; then' \
-        '  _home=$(getent passwd "$_user" 2>/dev/null | cut -d: -f6)' \
-        '  _uid=$(getent passwd  "$_user" 2>/dev/null | cut -d: -f3)' \
-        '  _gid=$(getent passwd  "$_user" 2>/dev/null | cut -d: -f4)' \
-        '  if [[ -n "$_home" && ! -d "$_home" ]]; then' \
-        '    mkdir -p "$_home"' \
-        '    cp -a /etc/skel/. "$_home/" 2>/dev/null || true' \
-        '    chown -R "$_uid:$_gid" "$_home"' \
-        '    chmod 700 "$_home"' \
-        '  fi' \
-        'fi' \
+        '[[ -n "$_user" ]] && /usr/local/bin/ood-pun-setup.sh "$_user" \' \
+        '    >> /var/log/ondemand/pun-setup.log 2>&1 || true' \
         'exec /opt/ood/nginx_stage/sbin/nginx_stage.real "$@"' \
         > /opt/ood/nginx_stage/sbin/nginx_stage && \
     chmod +x /opt/ood/nginx_stage/sbin/nginx_stage
