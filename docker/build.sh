@@ -115,8 +115,8 @@ fi
 [[ -f "$CONTEXT_DIR/Dockerfile" ]] || \
     die "Dockerfile not found at $CONTEXT_DIR/Dockerfile"
 
-if [[ ! -f "$CONTEXT_DIR/conf/$slurmdbd.conf" ]]; then
-    cat <<EOF > "$CONTEXT_DIR/conf/$slurmdbd.conf"
+if [[ ! -f "$CONTEXT_DIR/conf/slurmdbd.conf" ]]; then
+    cat <<EOF > "$CONTEXT_DIR/conf/slurmdbd.conf"
 # slurmdbd.conf — Slurm Database Daemon configuration
 # Reference: https://slurm.schedmd.com/slurmdbd.conf.html
 # File must be owned by slurm, mode 0600
