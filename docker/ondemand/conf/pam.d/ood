@@ -12,6 +12,9 @@ auth        required      pam_deny.so
 account     required      pam_unix.so
 account     [default=bad success=ok user_unknown=ignore] pam_sss.so
 account     required      pam_permit.so
+# Run provisioning script on every login (background, non-blocking).
+# Cooldown inside the script limits full work to once per hour.
+account     optional      pam_exec.so quiet --background /usr/local/bin/ood-pun-setup.sh
 
 session     required      pam_limits.so
 session     optional      pam_mkhomedir.so skel=/etc/skel umask=0077

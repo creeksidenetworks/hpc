@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
-# ood-pun-setup.sh — Per-user provisioning on first OOD login
+# ood-pun-setup.sh — Per-user provisioning called on every OOD login
 #
-# Called by the nginx_stage wrapper as root, receives the username as $1.
-# Runs every time a PUN starts (idempotent — checks before creating).
+# Invoked from two places:
+#   1. nginx_stage wrapper (as root, $1 = username) — on every PUN start
+#   2. pam_exec.so in /etc/pam.d/ood (as root, $PAM_USER = username) — on every login
+#
+# To avoid hammering sacctmgr on every HTTP request (Basic auth resends
+# credentials per request), a cooldown stamp file is checked. Full provisioning
+# runs at most once per hour; the home-directory check always runs (fast).
 #
 # Provisions:
 #   1. Home directory     — created from /etc/skel with correct ownership
 #   2. SSH keypair        — ECDSA key in ~/.ssh/id_ecdsa for shell app access
 #   3. SSH client config  — StrictHostKeyChecking=no for compute nodes
-#   4. authorized_keys    — own public key pre-authorized (passwordless SSH to self)
-#   5. Slurm account      — sacctmgr account + user via slurmdbd (network call)
-#
-# Note: sacctmgr talks to slurmdbd over the network using munge auth.
-# This works from the OOD container because Slurm client binaries and
-# a running munged with the shared key are both present.
+#   4. authorized_keys    — own public key pre-authorized
+#   5. Slurm account      — sacctmgr account + user via slurmdbd (munge auth)
 set -euo pipefail
 
-user="${1:-}"
+# Accept username from $1 (nginx_stage) or $PAM_USER (pam_exec)
+user="${1:-${PAM_USER:-}}"
 [[ -z "$user" ]] && exit 0
 
-# ---- Resolve user from SSSD (IPA users only — skip local system users) ----
+# ---- Resolve user from SSSD (skip unknown or system users) ----
 homedir=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
 uid=$(getent     passwd "$user" 2>/dev/null | cut -d: -f3)
 gid=$(getent     passwd "$user" 2>/dev/null | cut -d: -f4)
 
-[[ -z "$homedir" || -z "$uid" ]] && exit 0   # unknown user, skip
+[[ -z "$homedir" || -z "$uid" ]] && exit 0
+[[ "$uid" -lt 1000 ]] && exit 0          # skip system UIDs
 
-# Skip system UIDs (< 1000) — only provision real IPA users
-[[ "$uid" -lt 1000 ]] && exit 0
-
-# ---- 1. Home directory ----
+# ---- 1. Home directory (always checked — fast) ----
 if [[ ! -d "$homedir" ]]; then
     mkdir -p "$homedir"
     cp -a /etc/skel/. "$homedir/"
@@ -37,6 +37,15 @@ if [[ ! -d "$homedir" ]]; then
     chmod 700 "$homedir"
     echo "$(date): created home directory $homedir for $user"
 fi
+
+# ---- Cooldown: run full provisioning at most once per hour ----
+stamp="$homedir/.ood-setup"
+now=$(date +%s)
+if [[ -f "$stamp" ]]; then
+    last=$(stat -c %Y "$stamp" 2>/dev/null || echo 0)
+    [[ $(( now - last )) -lt 3600 ]] && exit 0   # ran < 1 hour ago, skip
+fi
+touch "$stamp" && chown "${uid}:${gid}" "$stamp" 2>/dev/null || true
 
 # ---- 2. SSH keypair ----
 ssh_dir="$homedir/.ssh"
@@ -79,7 +88,7 @@ if [[ -f "${ssh_key}.pub" ]]; then
     fi
 fi
 
-# ---- 5. Slurm account (via sacctmgr → slurmdbd, munge-authenticated) ----
+# ---- 5. Slurm account (sacctmgr → slurmdbd, munge-authenticated) ----
 if command -v sacctmgr &>/dev/null; then
     if ! sacctmgr list user "$user" -P -n 2>/dev/null | grep -q "^${user}|"; then
         sacctmgr -i add account "$user" \
