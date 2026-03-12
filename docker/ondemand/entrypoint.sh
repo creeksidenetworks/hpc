@@ -51,12 +51,24 @@ setup_ssl() {
 }
 
 # --------------------------------------------------------------------------
-# 4. PAM mkhomedir for OOD users
+# 4. Seed OOD system apps on first start
+#    The host bind-mount starts empty; copy built-in apps from the image
+#    backup so users can live-edit them without losing the defaults.
 # --------------------------------------------------------------------------
-enable_mkhomedir() {
-    local pam_file=/etc/pam.d/system-auth
-    if ! grep -q pam_mkhomedir "$pam_file" 2>/dev/null; then
-        echo "session optional pam_mkhomedir.so skel=/etc/skel umask=0077" >> "$pam_file"
+seed_apps() {
+    local src=/usr/share/ood-sys-apps-default
+    local dst=/var/www/ood/apps/sys
+
+    if [[ ! -d "$src" ]]; then
+        LOG "No app seed directory found at $src — skipping"
+        return
+    fi
+
+    if [[ ! -d "$dst/dashboard" ]]; then
+        LOG "Seeding OOD system apps from image defaults → $dst"
+        cp -a "$src/." "$dst/"
+    else
+        LOG "OOD system apps already present — skipping seed"
     fi
 }
 
@@ -97,7 +109,7 @@ main() {
     setup_munge
     fix_permissions
     setup_ssl
-    enable_mkhomedir
+    seed_apps
     generate_apache_config
 
     LOG "Handing off to supervisord..."

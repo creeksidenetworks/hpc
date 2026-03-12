@@ -87,7 +87,11 @@ RUN mkdir -p \
         /etc/munge \
         /var/log/ondemand \
         /var/lib/slurm && \
-    chmod 700 /etc/munge
+    chmod 700 /etc/munge && \
+    # Save built-in OOD system apps to a backup path inside the image.
+    # The entrypoint seeds the host-mounted /var/www/ood/apps/sys from here
+    # on first start so users can live-edit apps without losing built-ins.
+    cp -a /var/www/ood/apps/sys /usr/share/ood-sys-apps-default
 
 # --------------------------------------------------------------------------
 # Copy configs and entrypoint

@@ -21,6 +21,7 @@ volumes:
   slurm_spool:
   slurm_log:
   mariadb_data:
+  ood_home:        # shared user home directories between ondemand and slurmctld
 
 # ---------------------------------------------------------------------------
 # Network
@@ -86,6 +87,8 @@ services:
       # Persistent state
       - slurm_spool:/var/spool/slurm
       - slurm_log:/var/log/slurm
+      # Shared home directories with ondemand (so Slurm can read job files)
+      - ood_home:/home
     env_file:
       - ./ipa/ipa.conf               # IPA sync vars (IPA_SERVER, IPA_BIND_DN, etc.)
     environment:
@@ -129,9 +132,12 @@ services:
       - ./ondemand/conf/sssd.conf:/etc/sssd/sssd.conf:ro
       - ./ondemand/conf/pam.d/ood:/etc/pam.d/ood:ro
       - ./ipa/ca.crt:/etc/ipa/ca.crt:ro
-      # Interactive apps and widgets — live editable, no restart needed
+      # Interactive apps — seeded from image on first start, live editable thereafter
       - ./ondemand/apps:/var/www/ood/apps/sys
+      # Public assets / widgets / branding — live editable, no restart needed
       - ./ondemand/public:/var/www/ood/public
+      # Shared home directories with slurmctld (job files, SSH keys, etc.)
+      - ood_home:/home
     cap_add:
       - SYS_ADMIN       # required by sssd and OOD per-user nginx spawning
       - SETUID
