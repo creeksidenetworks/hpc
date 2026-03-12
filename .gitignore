@@ -16,6 +16,7 @@ docker/slurm/conf/slurmdbd.conf
 
 # OOD portal config — contains OIDC client secret (use ood_portal.yml.sample)
 docker/ondemand/conf/ood_portal.yml
+docker/ondemand/apps
 
 # SSSD configs — contain LDAP bind password (use sssd.conf.sample)
 docker/ondemand/conf/sssd.conf

@@ -117,17 +117,17 @@ COPY conf/cgroup.conf       /etc/slurm/cgroup.conf
 COPY conf/sssd.conf         /etc/sssd/sssd.conf
 COPY conf/supervisord.conf  /etc/supervisord.conf
 COPY entrypoint.sh          /usr/local/bin/entrypoint.sh
-COPY scripts/sync-slurm-ipa.sh /usr/local/bin/sync-slurm-ipa.sh
+COPY scripts/ipa-slurm-sync.sh /usr/local/bin/ipa-slurm-sync.sh
 
 RUN chmod 600 /etc/slurm/slurmdbd.conf && \
     chown slurm:slurm /etc/slurm/slurmdbd.conf && \
     chmod 600 /etc/sssd/sssd.conf && \
     chmod +x /usr/local/bin/entrypoint.sh \
-             /usr/local/bin/sync-slurm-ipa.sh && \
-    # Install crontab: run sync every 10 minutes, log to /var/log/slurm/sync-ipa.log
-    echo '*/10 * * * * root /usr/local/bin/sync-slurm-ipa.sh >> /var/log/slurm/sync-ipa.log 2>&1' \
-        > /etc/cron.d/sync-slurm-ipa && \
-    chmod 644 /etc/cron.d/sync-slurm-ipa
+             /usr/local/bin/ipa-slurm-sync.sh && \
+    # Install crontab: run sync every 10 minutes, log to /var/log/slurm/ipa-slurm-sync.log
+    echo '*/10 * * * * root /usr/local/bin/ipa-slurm-sync.sh >> /var/log/slurm/ipa-slurm-sync.log 2>&1' \
+        > /etc/cron.d/ipa-slurm-sync && \
+    chmod 644 /etc/cron.d/ipa-slurm-sync
 
 # Munge key placeholder — generated at runtime if not provided
 RUN mkdir -p /etc/munge && chmod 700 /etc/munge
