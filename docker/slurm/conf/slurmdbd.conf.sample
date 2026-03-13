@@ -1,6 +1,9 @@
 # slurmdbd.conf — Slurm Database Daemon configuration
 # Reference: https://slurm.schedmd.com/slurmdbd.conf.html
 # File must be owned by slurm, mode 0600
+#
+# Copy to slurmdbd.conf and set StoragePass to match MARIADB_SLURM_PASSWORD
+# in docker/.env.  build.sh will auto-generate both if they contain CHANGE_ME.
 
 # ----- Authentication -----
 AuthType=auth/munge
@@ -18,5 +21,5 @@ StorageType=accounting_storage/mysql
 StorageHost=mariadb          # hostname of the external MariaDB container
 StoragePort=3306
 StorageUser=slurm
-StoragePass=UbHGnYGid10HMHvIotB05jWpNsnuTgSC
+StoragePass=CHANGE_ME_DB_PASSWORD
 StorageLoc=slurm_acct_db
